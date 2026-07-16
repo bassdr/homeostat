@@ -1,0 +1,106 @@
+# =============================================================================
+# DRAFT: expected-return model for away detection
+# =============================================================================
+# Occupancy stops quantizing away-ness into away/away_returning/away_far;
+# perception publishes presence facts plus two time-until-return sensors, and
+# the daemon derives the old three buckets at its input boundary
+# (state.rs::Occupancy::derive). decide() and its matrix are untouched.
+#
+#   sensor.homeostat_occupancy    home / home_asleep / away   (3 states)
+#   sensor.homeostat_return_eta   credible estimate, minutes; 0 = no estimate
+#                                 (nav ETA > manual/calendar > none)
+#   sensor.homeostat_return_floor physical lower bound, minutes, from GPS
+#                                 distance at 100 km/h; 0 = vacuous floor
+#
+# Both time sensors are rounded to 5 min: templates referencing now() re-render
+# every minute, so bucket transitions reach the daemon as ordinary state
+# changes (it stays event-driven, no clock), and the rounding is the hysteresis
+# that keeps nav jitter from flapping decisions.
+#
+# NOT part of configuration.d - merging this into the live package means:
+#   1. replace the occupancy sensor with the version below
+#   2. add the two return sensors and the input_datetime
+#   3. delete binary_sensor.homeostat_returning_home (folded into return_eta)
+#   4. delete input_number.homeostat_away_far_distance (policy moved to the
+#      daemon: FAR_MIN in state.rs; note far now starts at ~200 km on
+#      distance data alone, vs the old knob's 100 km default)
+#   5. deploy perception BEFORE the daemon build that carries Presence::parse
+#      (the new parser rejects the legacy five-state values and suspends)
+# =============================================================================
+
+input_datetime:
+  homeostat_expected_return:
+    name: Homeostat expected return
+    # manual estimate of when someone is next home; ignored once in the
+    # past, so it needs no reset automation. Later: written by a calendar
+    # automation instead of a dashboard knob.
+    has_date: true
+    has_time: true
+    icon: mdi:home-clock
+
+template:
+  - sensor:
+      - name: homeostat_occupancy
+        unique_id: homeostat_occupancy
+        icon: mdi:account-question
+        state: >
+          {% if is_state('alarm_control_panel.home_alarm', 'armed_away') %}
+            away
+          {% else %}
+            {% set mf = states.binary_sensor.alarm_main_floor %}
+            {% set bs = states.binary_sensor.alarm_basement %}
+            {% set quiet = mf is not none and bs is not none
+               and mf.state == 'off' and bs.state == 'off'
+               and (now() - mf.last_changed).total_seconds() > 1800
+               and (now() - bs.last_changed).total_seconds() > 1800 %}
+            {% if is_state('input_boolean.homeostat_sleep_override', 'on')
+                  or (is_state('sun.sun', 'below_horizon') and quiet) %}
+              home_asleep
+            {% else %}
+              home
+            {% endif %}
+          {% endif %}
+
+      - name: homeostat_return_eta
+        unique_id: homeostat_return_eta
+        unit_of_measurement: min
+        state_class: measurement
+        icon: mdi:home-clock-outline
+        # 0 = no estimate (same convention as the comfort hold). Real
+        # estimates are ceiled to 5 min so they can never collapse to 0.
+        state: >
+          {% set nav = states('sensor.pointer_time_to_arrival') | float(0) %}
+          {% if is_state('device_tracker.pointer_route', 'home') and nav > 0 %}
+            {{ (nav / 5) | round(0, 'ceil') * 5 }}
+          {% else %}
+            {% set manual_ts = state_attr('input_datetime.homeostat_expected_return', 'timestamp') | float(0) %}
+            {% set mins = (manual_ts - now().timestamp()) / 60 %}
+            {% if mins > 0 %}
+              {{ (mins / 5) | round(0, 'ceil') * 5 }}
+            {% else %}
+              0
+            {% endif %}
+          {% endif %}
+        attributes:
+          source: >
+            {% if is_state('device_tracker.pointer_route', 'home')
+                  and states('sensor.pointer_time_to_arrival') | float(0) > 0 %}
+              nav
+            {% elif (state_attr('input_datetime.homeostat_expected_return', 'timestamp') | float(0))
+                    > now().timestamp() %}
+              manual
+            {% else %}
+              none
+            {% endif %}
+
+      - name: homeostat_return_floor
+        unique_id: homeostat_return_floor
+        unit_of_measurement: min
+        state_class: measurement
+        icon: mdi:map-marker-distance
+        # you cannot be home sooner than distance / 100 km/h. Floored to
+        # 5 min (a lower bound must round down to stay true); unknown GPS
+        # gives 0, the vacuously true floor.
+        state: >
+          {{ (distance('zone.home', 'person.david_racine') | float(0)
+              * 60 / 100 / 5) | round(0, 'floor') * 5 }}
