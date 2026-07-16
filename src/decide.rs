@@ -4,15 +4,11 @@
 //! combination is handled — the class of gap that caused the 2026-07-07
 //! incident cannot compile.
 
-use crate::state::{
-    EnergyPeriod, Inputs, Occupancy, Season, AUX_ZONE_THERMOSTATS, ENTITY_MAIN_HVAC,
-    ENTITY_WATER_HEATER,
-};
+use crate::state::{EnergyPeriod, Inputs, Occupancy, Season};
 
 /// Bounds for the final main-zone setpoint after the comfort offset.
 const SETPOINT_MIN: f64 = 15.0;
 const SETPOINT_MAX: f64 = 29.0;
-use serde_json::json;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HvacMode {
@@ -130,75 +126,6 @@ pub fn decide(i: &Inputs) -> Desired {
     }
 }
 
-/// One HA service call. Calls are executed strictly in `Vec` order — the
-/// planner encodes the mode-before-setpoint contract in the plan itself.
-#[derive(Debug, Clone, PartialEq)]
-pub struct ServiceCall {
-    pub domain: &'static str,
-    pub service: &'static str,
-    pub entity_ids: Vec<&'static str>,
-    pub data: serde_json::Value,
-}
-
-impl ServiceCall {
-    fn climate(service: &'static str, entities: Vec<&'static str>, data: serde_json::Value) -> Self {
-        Self { domain: "climate", service, entity_ids: entities, data }
-    }
-}
-
-/// Plan the writes for the main HVAC. Mode, setpoint and fan always travel
-/// together; a setpoint can never land on a stale mode (the 2026-07-07 bug).
-/// The comfort offset is already folded into the decision, so the plan is
-/// unconditional.
-pub fn plan_main_hvac(d: &Desired) -> Vec<ServiceCall> {
-    let mut plan = vec![ServiceCall::climate(
-        "set_hvac_mode",
-        vec![ENTITY_MAIN_HVAC],
-        json!({ "hvac_mode": d.main_mode.as_str() }),
-    )];
-    if d.main_mode != HvacMode::Off {
-        plan.push(ServiceCall::climate(
-            "set_temperature",
-            vec![ENTITY_MAIN_HVAC],
-            json!({ "temperature": d.main_setpoint }),
-        ));
-    }
-    plan.push(ServiceCall::climate(
-        "set_fan_mode",
-        vec![ENTITY_MAIN_HVAC],
-        json!({ "fan_mode": d.fan_mode.as_str() }),
-    ));
-    plan
-}
-
-pub fn plan_aux_zone(d: &Desired) -> Vec<ServiceCall> {
-    let thermostats = AUX_ZONE_THERMOSTATS.to_vec();
-    match d.aux_zone_setpoint {
-        None => vec![ServiceCall::climate("turn_off", thermostats, json!({}))],
-        Some(t) => vec![
-            ServiceCall::climate("turn_on", thermostats.clone(), json!({})),
-            ServiceCall::climate("set_temperature", thermostats, json!({ "temperature": t })),
-        ],
-    }
-}
-
-pub fn plan_water_heater(d: &Desired) -> Vec<ServiceCall> {
-    vec![ServiceCall {
-        domain: "switch",
-        service: if d.water_heater_on { "turn_on" } else { "turn_off" },
-        entity_ids: vec![ENTITY_WATER_HEATER],
-        data: json!({}),
-    }]
-}
-
-/// Full actuation plan for a decision.
-pub fn plan_all(d: &Desired) -> Vec<ServiceCall> {
-    let mut plan = plan_main_hvac(d);
-    plan.extend(plan_aux_zone(d));
-    plan.extend(plan_water_heater(d));
-    plan
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -218,8 +145,9 @@ mod tests {
     /// with the physical HVAC manually set to cool@26. The old system pushed
     /// a 19C *heat* setpoint onto the device without changing its mode,
     /// cooling the house to 19C all afternoon. The correct decision is cool
-    /// mode with a conservative high setpoint, and any plan must write the
-    /// mode before the setpoint so a manual mode can never go stale.
+    /// mode with a conservative high setpoint. The other half of the fix -
+    /// mode written before setpoint, always together - lives in the single
+    /// main-zone wire automation in HA (see the perception package).
     #[test]
     fn july_7_away_in_summer_never_cools_below_conservative() {
         let i = inputs(Occupancy::Away, EnergyPeriod::Normal, Season::Cool);
@@ -228,11 +156,6 @@ mod tests {
         assert_eq!(d.main_mode, HvacMode::Cool);
         assert_eq!(d.main_setpoint, 28.0);
         assert!(d.main_setpoint >= 26.0, "away cool setpoint must be conservative");
-
-        let plan = plan_main_hvac(&d);
-        let mode_pos = plan.iter().position(|c| c.service == "set_hvac_mode").unwrap();
-        let temp_pos = plan.iter().position(|c| c.service == "set_temperature").unwrap();
-        assert!(mode_pos < temp_pos, "mode must be written before setpoint");
     }
 
     #[test]
@@ -297,11 +220,6 @@ mod tests {
         let d = decide(&i);
         assert_eq!(d.main_mode, HvacMode::Off);
         assert_eq!(d.fan_mode, FanMode::On);
-        let plan = plan_main_hvac(&d);
-        assert!(
-            !plan.iter().any(|c| c.service == "set_temperature"),
-            "no setpoint write when mode is off"
-        );
     }
 
     #[test]

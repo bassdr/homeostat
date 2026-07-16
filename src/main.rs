@@ -7,7 +7,7 @@ use anyhow::{Context, Result};
 use std::time::Duration;
 use tracing::{error, info, warn};
 
-use decide::{decide, plan_all, Desired};
+use decide::{decide, Desired};
 use state::RawInputs;
 
 struct Config {
@@ -16,9 +16,6 @@ struct Config {
     mqtt_host: String,
     mqtt_port: u16,
     mqtt_credentials: Option<(String, String)>,
-    /// false = shadow mode: decisions are published but nothing is written
-    /// to physical devices.
-    actuate: bool,
 }
 
 impl Config {
@@ -40,7 +37,6 @@ impl Config {
                 (Ok(user), Ok(pass)) => Some((user, pass)),
                 _ => None,
             },
-            actuate: std::env::var("HOMEOSTAT_ACTUATE").is_ok_and(|v| v == "1" || v == "true"),
         })
     }
 }
@@ -55,13 +51,8 @@ async fn main() -> Result<()> {
         .init();
 
     let config = Config::from_env()?;
-    info!(
-        "starting homeostat (actuate={}) -> {}",
-        config.actuate, config.ha_url
-    );
-    if !config.actuate {
-        info!("shadow mode: decisions published to MQTT only, no device writes");
-    }
+    info!("starting homeostat -> {}", config.ha_url);
+    info!("decisions are published to MQTT; actuation is HA's job (wire automations)");
 
     let mqtt = mqtt::Mqtt::connect(
         &config.mqtt_host,
@@ -99,7 +90,7 @@ async fn run(config: &Config, mqtt: &mqtt::Mqtt) -> Result<()> {
     let mut heartbeat = tokio::time::interval(Duration::from_secs(60));
 
     // Decide immediately from the seeded snapshot.
-    step(&mut raw, &mut last_published, &mut ha, mqtt, config).await?;
+    step(&mut raw, &mut last_published, mqtt).await?;
 
     loop {
         tokio::select! {
@@ -112,7 +103,7 @@ async fn run(config: &Config, mqtt: &mqtt::Mqtt) -> Result<()> {
                 let (entity_id, new_state) = change?;
                 if raw.ingest(&entity_id, &new_state) {
                     info!("input changed: {entity_id} = {new_state}");
-                    step(&mut raw, &mut last_published, &mut ha, mqtt, config).await?;
+                    step(&mut raw, &mut last_published, mqtt).await?;
                 }
             }
         }
@@ -122,9 +113,7 @@ async fn run(config: &Config, mqtt: &mqtt::Mqtt) -> Result<()> {
 async fn step(
     raw: &mut RawInputs,
     last_published: &mut Option<Desired>,
-    ha: &mut ha::HaClient,
     mqtt: &mqtt::Mqtt,
-    config: &Config,
 ) -> Result<()> {
     let Some(inputs) = raw.complete() else {
         warn!("perception layer incomplete, holding decisions: {raw:?}");
@@ -138,13 +127,6 @@ async fn step(
 
     info!("decision: {desired:?} (from {inputs:?})");
     mqtt.publish_desired(&desired, &inputs).await?;
-
-    if config.actuate {
-        for call in plan_all(&desired) {
-            ha.call_service(&call).await?;
-        }
-    }
-
     *last_published = Some(desired);
     Ok(())
 }

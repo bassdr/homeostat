@@ -10,8 +10,6 @@ use tokio::net::TcpStream;
 use tokio_tungstenite::{connect_async, tungstenite::Message, MaybeTlsStream, WebSocketStream};
 use tracing::{debug, info, warn};
 
-use crate::decide::ServiceCall;
-
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 enum ServerMsg {
@@ -123,22 +121,6 @@ impl HaClient {
                 other => debug!("ignoring message: {other:?}"),
             }
         }
-    }
-
-    pub async fn call_service(&mut self, call: &ServiceCall) -> Result<()> {
-        info!(
-            "call_service {}.{} -> {:?} {}",
-            call.domain, call.service, call.entity_ids, call.data
-        );
-        self.send(json!({
-            "type": "call_service",
-            "domain": call.domain,
-            "service": call.service,
-            "target": { "entity_id": call.entity_ids },
-            "service_data": call.data,
-        }))
-        .await?;
-        Ok(())
     }
 
     async fn send(&mut self, mut payload: serde_json::Value) -> Result<u64> {

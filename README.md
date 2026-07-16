@@ -3,8 +3,10 @@
 Holds the house in equilibrium (after [Ashby's homeostat](https://en.wikipedia.org/wiki/Homeostat),
 1948). The daemon subscribes to a small set of *perception entities* you
 define in Home Assistant, runs a decision matrix as a pure, unit-tested
-function, publishes its decision back as `sensor.homeostat_desired` via MQTT
-discovery, and (once enabled) actuates the physical devices.
+function, and publishes its decision back as `sensor.homeostat_desired` via
+MQTT discovery. Actuation is HA's job: thin "wire" automations (no decision
+logic, gated by an `input_boolean`) forward the desired values to your
+devices. The daemon contains no entity IDs of physical hardware at all.
 
 ## The perception contract
 
@@ -27,18 +29,23 @@ credit, Tempo, Octopus events, a plain time-of-use schedule). If any input
 is `unknown`/`unavailable`, homeostat holds its last decision rather than
 acting on garbage.
 
-The actuated entities (main thermostat, zone heaters, water heater switch)
-are currently constants in `src/state.rs` — fork and adjust, or open an
-issue if you want them configurable.
+Outputs are consumed the same way: your wire automations read
+`sensor.homeostat_desired`'s attributes (`main_mode`, `main_setpoint`,
+`fan_mode`, `aux_zone_setpoint`, `water_heater`) and forward them to your
+devices. See the author's config for worked examples, including the one rule
+that matters: the main zone's mode and setpoint must be forwarded together,
+in that order, by a single automation.
 
 ## Design invariants
 
 - **The matrix is a pure function** (`src/decide.rs`) — every temperature in
   the system is in one file, exhaustively matched: an unhandled
   (season × period × occupancy) combination is a compile error.
-- **Mode before setpoint, always together** — the write planner encodes the
-  ordering that prevents the 2026-07-07 incident (a heat setpoint applied to
-  a device left in cool mode). There is a regression test for that day.
+- **Mode before setpoint, always together** — the decision publishes them
+  as one state change so the main-zone wire automation forwards the whole
+  triple atomically, preventing the 2026-07-07 incident (a heat setpoint
+  applied to a device left in cool mode). There is a regression test for
+  that day's decision.
 - **Fail loud, fail safe** — unknown entity states suspend decisions instead
   of feeding garbage into the matrix; MQTT last-will marks the sensor
   unavailable if the daemon dies; a retained heartbeat timestamp allows a
@@ -60,7 +67,6 @@ cargo build --release   # -> target/release/homeostat
 | `HOMEOSTAT_MQTT_HOST` | `127.0.0.1`                          |                                |
 | `HOMEOSTAT_MQTT_PORT` | `1883`                               |                                |
 | `HOMEOSTAT_MQTT_USER` | (none)                               | with `HOMEOSTAT_MQTT_PASS`         |
-| `HOMEOSTAT_ACTUATE`   | unset (shadow mode)                  | `1`/`true` to write to devices |
 
 ## Deployment (systemd)
 
@@ -87,5 +93,5 @@ WantedBy=multi-user.target
 2. Run homeostat in shadow mode; compare `sensor.homeostat_desired` against
    `sensor.homeostat_desired` (the YAML matrix) in HA history for a few days.
 3. Add a dead-man automation on `homeostat/heartbeat` staleness.
-4. Set `HOMEOSTAT_ACTUATE=1`, keep the YAML actuator automations and the old
-   automations disabled. The YAML v2 package remains the rollback path.
+4. Turn on the actuation gate (`input_boolean.homeostat_enabled`) and
+   disable the legacy automations. Rollback is flipping the boolean back.
