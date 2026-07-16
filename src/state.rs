@@ -8,7 +8,7 @@ pub const ENTITY_OCCUPANCY: &str = "sensor.homeostat_occupancy";
 pub const ENTITY_ENERGY_PERIOD: &str = "sensor.homeostat_energy_period";
 pub const ENTITY_SEASON: &str = "sensor.homeostat_season";
 pub const ENTITY_AUX_ZONE_OCCUPIED: &str = "binary_sensor.homeostat_aux_zone_occupied";
-pub const ENTITY_COMFORT_OFFSET: &str = "input_number.homeostat_comfort_offset";
+pub const ENTITY_COMFORT_SETPOINT: &str = "input_number.homeostat_comfort_setpoint";
 
 /// Entities the daemon writes to (actuation layer).
 pub const ENTITY_MAIN_HVAC: &str = "climate.neviweb130_climate_hvac";
@@ -88,8 +88,8 @@ pub struct Inputs {
     pub energy_period: EnergyPeriod,
     pub season: Season,
     pub aux_zone_occupied: bool,
-    /// Manual comfort adjustment in degrees C; 0 = no override.
-    pub comfort_offset: f64,
+    /// Manual hold: absolute setpoint in degrees C; 0 = none (automatic).
+    pub comfort_setpoint: f64,
 }
 
 /// Accumulates entity states as they arrive; yields `Inputs` only once every
@@ -100,7 +100,9 @@ pub struct RawInputs {
     energy_period: Option<EnergyPeriod>,
     season: Option<Season>,
     aux_zone_occupied: Option<bool>,
-    comfort_offset: Option<f64>,
+    /// Plain f64, not Option: this input is optional by design -
+    /// unavailable/unknown means "no hold" and must not suspend decisions.
+    comfort_setpoint: f64,
 }
 
 impl RawInputs {
@@ -119,8 +121,14 @@ impl RawInputs {
                     _ => None,
                 },
             ),
-            ENTITY_COMFORT_OFFSET => {
-                Self::set(&mut self.comfort_offset, state.parse::<f64>().ok())
+            ENTITY_COMFORT_SETPOINT => {
+                let value = state.parse::<f64>().unwrap_or(0.0);
+                if self.comfort_setpoint == value {
+                    false
+                } else {
+                    self.comfort_setpoint = value;
+                    true
+                }
             }
             _ => false,
         }
@@ -141,7 +149,34 @@ impl RawInputs {
             energy_period: self.energy_period?,
             season: self.season?,
             aux_zone_occupied: self.aux_zone_occupied?,
-            comfort_offset: self.comfort_offset?,
+            comfort_setpoint: self.comfort_setpoint,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn unavailable_comfort_hold_means_no_hold_and_does_not_suspend() {
+        let mut raw = RawInputs::default();
+        raw.ingest(ENTITY_OCCUPANCY, "home");
+        raw.ingest(ENTITY_ENERGY_PERIOD, "normal");
+        raw.ingest(ENTITY_SEASON, "heat");
+        raw.ingest(ENTITY_AUX_ZONE_OCCUPIED, "off");
+        raw.ingest(ENTITY_COMFORT_SETPOINT, "unavailable");
+        let inputs = raw.complete().expect("an optional input must not suspend decisions");
+        assert_eq!(inputs.comfort_setpoint, 0.0);
+    }
+
+    #[test]
+    fn unknown_occupancy_suspends_decisions() {
+        let mut raw = RawInputs::default();
+        raw.ingest(ENTITY_OCCUPANCY, "unknown");
+        raw.ingest(ENTITY_ENERGY_PERIOD, "normal");
+        raw.ingest(ENTITY_SEASON, "heat");
+        raw.ingest(ENTITY_AUX_ZONE_OCCUPIED, "off");
+        assert!(raw.complete().is_none(), "garbage in a required input must suspend");
     }
 }
