@@ -20,7 +20,7 @@ open-data peak feed):
 | `sensor.homeostat_energy_period`           | `normal` `preheat` `peak`                          |
 | `sensor.homeostat_season`                  | `heat` `fan` `cool`                                |
 | `binary_sensor.homeostat_aux_zone_occupied`| `on` / `off`                                       |
-| `input_number.homeostat_comfort_offset`   | °C offset, `0` = no override                       |
+| `input_number.homeostat_comfort_setpoint` | absolute hold in °C, `0` = automatic               |
 
 `energy_period` abstracts any demand-response program (Hydro-Québec winter
 credit, Tempo, Octopus events, a plain time-of-use schedule). If any input
