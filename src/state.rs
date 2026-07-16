@@ -8,7 +8,7 @@ pub const ENTITY_OCCUPANCY: &str = "sensor.homeostat_occupancy";
 pub const ENTITY_ENERGY_PERIOD: &str = "sensor.homeostat_energy_period";
 pub const ENTITY_SEASON: &str = "sensor.homeostat_season";
 pub const ENTITY_AUX_ZONE_OCCUPIED: &str = "binary_sensor.homeostat_aux_zone_occupied";
-pub const ENTITY_COMFORT_OVERRIDE: &str = "input_select.homeostat_comfort_override";
+pub const ENTITY_COMFORT_OFFSET: &str = "input_number.homeostat_comfort_offset";
 
 /// Entities the daemon writes to (actuation layer).
 pub const ENTITY_MAIN_HVAC: &str = "climate.neviweb130_climate_hvac";
@@ -81,29 +81,6 @@ impl Season {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum ComfortOverride {
-    #[default]
-    None,
-    TooCold,
-    TooHot,
-}
-
-impl ComfortOverride {
-    pub fn parse(s: &str) -> Option<Self> {
-        match s {
-            "none" => Some(Self::None),
-            "too_cold" => Some(Self::TooCold),
-            "too_hot" => Some(Self::TooHot),
-            _ => None,
-        }
-    }
-
-    pub fn is_active(self) -> bool {
-        !matches!(self, Self::None)
-    }
-}
-
 /// Complete, validated snapshot of the perception layer.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Inputs {
@@ -111,7 +88,8 @@ pub struct Inputs {
     pub energy_period: EnergyPeriod,
     pub season: Season,
     pub aux_zone_occupied: bool,
-    pub comfort_override: ComfortOverride,
+    /// Manual comfort adjustment in degrees C; 0 = no override.
+    pub comfort_offset: f64,
 }
 
 /// Accumulates entity states as they arrive; yields `Inputs` only once every
@@ -122,7 +100,7 @@ pub struct RawInputs {
     energy_period: Option<EnergyPeriod>,
     season: Option<Season>,
     aux_zone_occupied: Option<bool>,
-    comfort_override: Option<ComfortOverride>,
+    comfort_offset: Option<f64>,
 }
 
 impl RawInputs {
@@ -141,8 +119,8 @@ impl RawInputs {
                     _ => None,
                 },
             ),
-            ENTITY_COMFORT_OVERRIDE => {
-                Self::set(&mut self.comfort_override, ComfortOverride::parse(state))
+            ENTITY_COMFORT_OFFSET => {
+                Self::set(&mut self.comfort_offset, state.parse::<f64>().ok())
             }
             _ => false,
         }
@@ -163,7 +141,7 @@ impl RawInputs {
             energy_period: self.energy_period?,
             season: self.season?,
             aux_zone_occupied: self.aux_zone_occupied?,
-            comfort_override: self.comfort_override?,
+            comfort_offset: self.comfort_offset?,
         })
     }
 }

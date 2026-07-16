@@ -140,7 +140,7 @@ async fn step(
     mqtt.publish_desired(&desired, &inputs).await?;
 
     if config.actuate {
-        for call in plan_all(&desired, &inputs) {
+        for call in plan_all(&desired) {
             ha.call_service(&call).await?;
         }
     }

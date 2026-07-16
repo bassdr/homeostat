@@ -8,6 +8,10 @@ use crate::state::{
     EnergyPeriod, Inputs, Occupancy, Season, AUX_ZONE_THERMOSTATS, ENTITY_MAIN_HVAC,
     ENTITY_WATER_HEATER,
 };
+
+/// Bounds for the final main-zone setpoint after the comfort offset.
+const SETPOINT_MIN: f64 = 15.0;
+const SETPOINT_MAX: f64 = 29.0;
 use serde_json::json;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -91,6 +95,15 @@ pub fn decide(i: &Inputs) -> Desired {
         },
     };
 
+    // Honor a manual comfort adjustment on the main zone when someone is
+    // home and no grid event is running (peak/preheat always win). The
+    // reset-on-away automation in HA is belt and suspenders on top of this.
+    let main_setpoint = if i.occupancy.is_home() && i.energy_period == Normal {
+        (main_setpoint + i.comfort_offset).clamp(SETPOINT_MIN, SETPOINT_MAX)
+    } else {
+        main_setpoint
+    };
+
     let fan_mode = if i.season == Fan || i.occupancy.is_home() {
         FanMode::On
     } else {
@@ -131,15 +144,9 @@ impl ServiceCall {
 
 /// Plan the writes for the main HVAC. Mode, setpoint and fan always travel
 /// together; a setpoint can never land on a stale mode (the 2026-07-07 bug).
-/// Returns an empty plan when a human comfort override is being respected.
-pub fn plan_main_hvac(d: &Desired, i: &Inputs) -> Vec<ServiceCall> {
-    let respect_override = i.comfort_override.is_active()
-        && i.energy_period == EnergyPeriod::Normal
-        && i.occupancy.is_home();
-    if respect_override {
-        return vec![];
-    }
-
+/// The comfort offset is already folded into the decision, so the plan is
+/// unconditional.
+pub fn plan_main_hvac(d: &Desired) -> Vec<ServiceCall> {
     let mut plan = vec![ServiceCall::climate(
         "set_hvac_mode",
         vec![ENTITY_MAIN_HVAC],
@@ -181,8 +188,8 @@ pub fn plan_water_heater(d: &Desired) -> Vec<ServiceCall> {
 }
 
 /// Full actuation plan for a decision.
-pub fn plan_all(d: &Desired, i: &Inputs) -> Vec<ServiceCall> {
-    let mut plan = plan_main_hvac(d, i);
+pub fn plan_all(d: &Desired) -> Vec<ServiceCall> {
+    let mut plan = plan_main_hvac(d);
     plan.extend(plan_aux_zone(d));
     plan.extend(plan_water_heater(d));
     plan
@@ -191,7 +198,7 @@ pub fn plan_all(d: &Desired, i: &Inputs) -> Vec<ServiceCall> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::state::{ComfortOverride, EnergyPeriod, Occupancy, Season};
+    use crate::state::{EnergyPeriod, Occupancy, Season};
 
     fn inputs(occupancy: Occupancy, energy_period: EnergyPeriod, season: Season) -> Inputs {
         Inputs {
@@ -199,7 +206,7 @@ mod tests {
             energy_period,
             season,
             aux_zone_occupied: false,
-            comfort_override: ComfortOverride::None,
+            comfort_offset: 0.0,
         }
     }
 
@@ -218,7 +225,7 @@ mod tests {
         assert_eq!(d.main_setpoint, 28.0);
         assert!(d.main_setpoint >= 26.0, "away cool setpoint must be conservative");
 
-        let plan = plan_main_hvac(&d, &i);
+        let plan = plan_main_hvac(&d);
         let mode_pos = plan.iter().position(|c| c.service == "set_hvac_mode").unwrap();
         let temp_pos = plan.iter().position(|c| c.service == "set_temperature").unwrap();
         assert!(mode_pos < temp_pos, "mode must be written before setpoint");
@@ -245,15 +252,27 @@ mod tests {
     }
 
     #[test]
-    fn comfort_override_pauses_main_hvac_but_not_during_peak() {
+    fn comfort_offset_honored_at_home_but_never_during_grid_events_or_away() {
         let mut i = inputs(Occupancy::Home, EnergyPeriod::Normal, Season::Heat);
-        i.comfort_override = ComfortOverride::TooCold;
-        let d = decide(&i);
-        assert!(plan_main_hvac(&d, &i).is_empty(), "override respected at home, normal period");
+        i.comfort_offset = 1.5;
+        assert_eq!(decide(&i).main_setpoint, 24.0, "22.5 + 1.5 honored at home");
 
         i.energy_period = EnergyPeriod::Peak;
-        let d = decide(&i);
-        assert!(!plan_main_hvac(&d, &i).is_empty(), "peak always wins over comfort");
+        assert_eq!(decide(&i).main_setpoint, 16.0, "peak ignores the offset");
+
+        i.energy_period = EnergyPeriod::Preheat;
+        assert_eq!(decide(&i).main_setpoint, 25.0, "preheat ignores the offset");
+
+        i.energy_period = EnergyPeriod::Normal;
+        i.occupancy = Occupancy::Away;
+        assert_eq!(decide(&i).main_setpoint, 19.0, "a stale offset is ignored when away");
+    }
+
+    #[test]
+    fn comfort_offset_is_clamped() {
+        let mut i = inputs(Occupancy::Home, EnergyPeriod::Normal, Season::Cool);
+        i.comfort_offset = 5.0;
+        assert_eq!(decide(&i).main_setpoint, 29.0, "25 + 5 clamps to SETPOINT_MAX");
     }
 
     #[test]
@@ -262,7 +281,7 @@ mod tests {
         let d = decide(&i);
         assert_eq!(d.main_mode, HvacMode::Off);
         assert_eq!(d.fan_mode, FanMode::On);
-        let plan = plan_main_hvac(&d, &i);
+        let plan = plan_main_hvac(&d);
         assert!(
             !plan.iter().any(|c| c.service == "set_temperature"),
             "no setpoint write when mode is off"
