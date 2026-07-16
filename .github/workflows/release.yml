@@ -32,6 +32,8 @@ jobs:
       - uses: softprops/action-gh-release@v2
         with:
           files: homeostat-${{ matrix.target }}.tar.gz
+          # semver convention: a hyphen in the tag (v0.2.0-rc1) = pre-release
+          prerelease: ${{ contains(github.ref_name, '-') }}
 
   docker:
     # assembles multi-arch images from the prebuilt static binaries -
@@ -64,7 +66,8 @@ jobs:
           images: ghcr.io/${{ github.repository }}
           tags: |
             type=semver,pattern={{version}}
-            type=raw,value=latest
+            # pre-releases (hyphen in tag) never move :latest
+            type=raw,value=latest,enable=${{ !contains(github.ref_name, '-') }}
       - uses: docker/build-push-action@v6
         with:
           context: .
