@@ -1,0 +1,12 @@
+#!/bin/sh
+# Mirrors the CI gates (.github/workflows/ci.yml). Enable once per clone:
+#   git config core.hooksPath .githooks
+set -e
+
+if ! cargo fmt --check; then
+    echo ""
+    echo "pre-commit: rustfmt violations. Run 'cargo fmt', re-stage, commit again."
+    exit 1
+fi
+
+cargo clippy --all-targets --quiet -- -D warnings
