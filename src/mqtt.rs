@@ -77,10 +77,14 @@ impl Mqtt {
             "name": "Homeostat",
             "sw_version": env!("CARGO_PKG_VERSION"),
         });
-        let entity = |name: &str, state_topic: &str, extra: Value| -> Value {
+        // entity_id is composed by HA as <domain>.<device>_<slug(name)>, so
+        // names must not repeat the homeostat_ prefix - the device supplies
+        // it. unique_id is the registry key and must never change, or the
+        // entity loses its identity and history.
+        let entity = |name: &str, unique_id: &str, state_topic: &str, extra: Value| -> Value {
             let mut config = json!({
                 "name": name,
-                "unique_id": name,
+                "unique_id": unique_id,
                 "state_topic": state_topic,
                 "availability_topic": TOPIC_STATUS,
                 "device": device,
@@ -101,6 +105,7 @@ impl Mqtt {
             (
                 "sensor",
                 entity(
+                    "desired",
                     "homeostat_desired",
                     TOPIC_STATE,
                     json!({ "json_attributes_topic": TOPIC_ATTRS, "icon": "mdi:robot" }),
@@ -109,6 +114,7 @@ impl Mqtt {
             (
                 "sensor",
                 entity(
+                    "desired main setpoint",
                     "homeostat_desired_main_setpoint",
                     TOPIC_MAIN_SETPOINT,
                     temperature.clone(),
@@ -117,6 +123,7 @@ impl Mqtt {
             (
                 "sensor",
                 entity(
+                    "desired main mode",
                     "homeostat_desired_main_mode",
                     TOPIC_MAIN_MODE,
                     json!({ "icon": "mdi:sun-snowflake-variant" }),
@@ -125,6 +132,7 @@ impl Mqtt {
             (
                 "sensor",
                 entity(
+                    "desired fan mode",
                     "homeostat_desired_fan_mode",
                     TOPIC_FAN_MODE,
                     json!({ "icon": "mdi:fan" }),
@@ -134,6 +142,7 @@ impl Mqtt {
             (
                 "sensor",
                 entity(
+                    "desired aux zone setpoint",
                     "homeostat_desired_aux_zone_setpoint",
                     TOPIC_AUX_SETPOINT,
                     temperature,
@@ -142,6 +151,7 @@ impl Mqtt {
             (
                 "binary_sensor",
                 entity(
+                    "desired water heater",
                     "homeostat_desired_water_heater",
                     TOPIC_WATER_HEATER,
                     json!({ "payload_on": "on", "payload_off": "off", "icon": "mdi:water-boiler" }),
