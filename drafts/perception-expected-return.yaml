@@ -55,18 +55,21 @@
 
 input_number:
   homeostat_recovery_rate:
-    name: Homeostat recovery rate
-    # measured, not guessed: hourly stats of sensor.hvac_t across winter
-    # 2025-26 (the new HVAC's first winter) show sustained recovery
-    # episodes at a median 1.22 C/h (p90 single hour 1.64, absolute best
-    # 2.34). David's stage telemetry (input_number.hvac_dt, C/h) is the
-    # live counterpart; this knob is the planning value derived from its
-    # history. Conservative on purpose: overestimating the rate means
-    # arriving to a cold house.
+    name: Homeostat recovery rate at 0C outside
+    # measured, not guessed: 43 sustained recovery episodes (>=2 h of solid
+    # heating) in the hourly stats of sensor.hvac_t across winter 2025-26
+    # (the new HVAC's first winter) fit rate = 1.38 + 0.015 * T_out C/h -
+    # 1.4 at freezing, 1.2 at -10, ~1.0 at -25 (extrapolated; matches the
+    # lived 'stage 2 barely compensates at -25'). This knob is the 0C
+    # intercept; the slope lives in the recovery_minutes template. Short
+    # bursts run hotter (22->24 in ~40 min) but hourly means smear them,
+    # and the sustained rate is the conservative planning number anyway:
+    # overestimating the rate means arriving to a cold house. Live
+    # counterpart of this telemetry: input_number.hvac_dt.
     min: 0.5
     max: 4.5
     step: 0.1
-    initial: 1.2
+    initial: 1.4
     unit_of_measurement: °C/h
     icon: mdi:thermometer-chevron-up
 
@@ -215,10 +218,14 @@ template:
         icon: mdi:thermometer-chevron-up
         # time to bring the main zone back to livable (19C, not full
         # comfort - finishing the warm-up while home is acceptable) at the
-        # measured recovery rate (see homeostat_recovery_rate). Warm house
-        # (>= 19C) = 0: the daemon then applies its plain ~20 min comfort
-        # pre-start.
+        # measured recovery rate: 0C intercept from the knob, -0.015 C/h
+        # per degree colder outside (winter 2025-26 fit, see the knob's
+        # comment), clamped to a 0.8 floor below the measured range. Warm
+        # house (>= 19C) = 0: the daemon then applies its plain ~20 min
+        # comfort pre-start.
         state: >
           {% set t = state_attr('climate.neviweb130_climate_hvac', 'current_temperature') | float(19) %}
-          {% set rate = states('input_number.homeostat_recovery_rate') | float(1.2) %}
+          {% set t_out = states('sensor.maison_temperature') | float(0) %}
+          {% set rate = [states('input_number.homeostat_recovery_rate') | float(1.4)
+                         + 0.015 * t_out, 0.8] | max %}
           {{ ([(19 - t) * 60 / rate, 0] | max / 5) | round(0, 'ceil') * 5 }}
