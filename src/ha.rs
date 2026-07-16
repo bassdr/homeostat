@@ -106,8 +106,8 @@ impl HaClient {
                     struct NewState {
                         state: String,
                     }
-                    let data: ChangeData = serde_json::from_value(event.data)
-                        .context("parsing state_changed data")?;
+                    let data: ChangeData =
+                        serde_json::from_value(event.data).context("parsing state_changed data")?;
                     if let Some(new_state) = data.new_state {
                         return Ok((data.entity_id, new_state.state));
                     }

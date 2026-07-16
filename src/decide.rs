@@ -95,14 +95,12 @@ pub fn decide(i: &Inputs) -> Desired {
     // semantics) on the main zone when someone is home and no grid event is
     // running (peak/preheat always win). The reset-on-away automation in HA
     // is belt and suspenders on top of this.
-    let main_setpoint = if i.occupancy.is_home()
-        && i.energy_period == Normal
-        && i.comfort_setpoint > 0.0
-    {
-        i.comfort_setpoint.clamp(SETPOINT_MIN, SETPOINT_MAX)
-    } else {
-        main_setpoint
-    };
+    let main_setpoint =
+        if i.occupancy.is_home() && i.energy_period == Normal && i.comfort_setpoint > 0.0 {
+            i.comfort_setpoint.clamp(SETPOINT_MIN, SETPOINT_MAX)
+        } else {
+            main_setpoint
+        };
 
     let fan_mode = if i.season == Fan || i.occupancy.is_home() {
         FanMode::On
@@ -155,7 +153,10 @@ mod tests {
 
         assert_eq!(d.main_mode, HvacMode::Cool);
         assert_eq!(d.main_setpoint, 28.0);
-        assert!(d.main_setpoint >= 26.0, "away cool setpoint must be conservative");
+        assert!(
+            d.main_setpoint >= 26.0,
+            "away cool setpoint must be conservative"
+        );
     }
 
     #[test]
@@ -170,11 +171,23 @@ mod tests {
     #[test]
     fn returning_gets_milder_peak_and_richer_preheat_than_away() {
         let away_peak = decide(&inputs(Occupancy::Away, EnergyPeriod::Peak, Season::Heat));
-        let ret_peak = decide(&inputs(Occupancy::AwayReturning, EnergyPeriod::Peak, Season::Heat));
+        let ret_peak = decide(&inputs(
+            Occupancy::AwayReturning,
+            EnergyPeriod::Peak,
+            Season::Heat,
+        ));
         assert!(ret_peak.main_setpoint > away_peak.main_setpoint);
 
-        let away_pre = decide(&inputs(Occupancy::Away, EnergyPeriod::Preheat, Season::Heat));
-        let ret_pre = decide(&inputs(Occupancy::AwayReturning, EnergyPeriod::Preheat, Season::Heat));
+        let away_pre = decide(&inputs(
+            Occupancy::Away,
+            EnergyPeriod::Preheat,
+            Season::Heat,
+        ));
+        let ret_pre = decide(&inputs(
+            Occupancy::AwayReturning,
+            EnergyPeriod::Preheat,
+            Season::Heat,
+        ));
         assert!(ret_pre.main_setpoint > away_pre.main_setpoint);
     }
 
@@ -184,16 +197,32 @@ mod tests {
         // each assertion can only pass for the right reason
         let mut i = inputs(Occupancy::Home, EnergyPeriod::Normal, Season::Heat);
         i.comfort_setpoint = 23.5;
-        assert_eq!(decide(&i).main_setpoint, 23.5, "manual hold applied at home");
+        assert_eq!(
+            decide(&i).main_setpoint,
+            23.5,
+            "manual hold applied at home"
+        );
 
         i.occupancy = Occupancy::HomeAsleep;
-        assert_eq!(decide(&i).main_setpoint, 23.5, "hold survives schedule transitions");
+        assert_eq!(
+            decide(&i).main_setpoint,
+            23.5,
+            "hold survives schedule transitions"
+        );
 
         i.energy_period = EnergyPeriod::Peak;
-        assert_eq!(decide(&i).main_setpoint, 16.0, "peak overrides the hold's effect");
+        assert_eq!(
+            decide(&i).main_setpoint,
+            16.0,
+            "peak overrides the hold's effect"
+        );
 
         i.energy_period = EnergyPeriod::Preheat;
-        assert_eq!(decide(&i).main_setpoint, 24.0, "preheat overrides the hold's effect");
+        assert_eq!(
+            decide(&i).main_setpoint,
+            24.0,
+            "preheat overrides the hold's effect"
+        );
 
         i.energy_period = EnergyPeriod::Normal;
         assert_eq!(
@@ -203,15 +232,27 @@ mod tests {
         );
 
         i.occupancy = Occupancy::Away;
-        assert_eq!(decide(&i).main_setpoint, 19.0, "a stale hold is ignored when away");
+        assert_eq!(
+            decide(&i).main_setpoint,
+            19.0,
+            "a stale hold is ignored when away"
+        );
     }
 
     #[test]
     fn comfort_hold_zero_means_automatic_and_values_are_clamped() {
         let mut i = inputs(Occupancy::Home, EnergyPeriod::Normal, Season::Heat);
-        assert_eq!(decide(&i).main_setpoint, 22.5, "0 = no hold, matrix applies");
+        assert_eq!(
+            decide(&i).main_setpoint,
+            22.5,
+            "0 = no hold, matrix applies"
+        );
         i.comfort_setpoint = 5.0;
-        assert_eq!(decide(&i).main_setpoint, 15.0, "a lowball hold clamps to SETPOINT_MIN");
+        assert_eq!(
+            decide(&i).main_setpoint,
+            15.0,
+            "a lowball hold clamps to SETPOINT_MIN"
+        );
     }
 
     #[test]

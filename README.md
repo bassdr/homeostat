@@ -95,3 +95,9 @@ WantedBy=multi-user.target
 3. Add a dead-man automation on `homeostat/heartbeat` staleness.
 4. Turn on the actuation gate (`input_boolean.homeostat_enabled`) and
    disable the legacy automations. Rollback is flipping the boolean back.
+
+## Development
+
+```bash
+git config core.hooksPath .githooks   # once per clone: fmt + clippy before each commit
+```

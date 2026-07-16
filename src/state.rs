@@ -157,7 +157,9 @@ mod tests {
         raw.ingest(ENTITY_SEASON, "heat");
         raw.ingest(ENTITY_AUX_ZONE_OCCUPIED, "off");
         raw.ingest(ENTITY_COMFORT_SETPOINT, "unavailable");
-        let inputs = raw.complete().expect("an optional input must not suspend decisions");
+        let inputs = raw
+            .complete()
+            .expect("an optional input must not suspend decisions");
         assert_eq!(inputs.comfort_setpoint, 0.0);
     }
 
@@ -168,6 +170,9 @@ mod tests {
         raw.ingest(ENTITY_ENERGY_PERIOD, "normal");
         raw.ingest(ENTITY_SEASON, "heat");
         raw.ingest(ENTITY_AUX_ZONE_OCCUPIED, "off");
-        assert!(raw.complete().is_none(), "garbage in a required input must suspend");
+        assert!(
+            raw.complete().is_none(),
+            "garbage in a required input must suspend"
+        );
     }
 }

@@ -21,10 +21,19 @@ pub struct Mqtt {
 }
 
 impl Mqtt {
-    pub async fn connect(host: &str, port: u16, credentials: Option<(String, String)>) -> Result<Self> {
+    pub async fn connect(
+        host: &str,
+        port: u16,
+        credentials: Option<(String, String)>,
+    ) -> Result<Self> {
         let mut options = MqttOptions::new("homeostat", host, port);
         options.set_keep_alive(Duration::from_secs(30));
-        options.set_last_will(LastWill::new(TOPIC_STATUS, "offline", QoS::AtLeastOnce, true));
+        options.set_last_will(LastWill::new(
+            TOPIC_STATUS,
+            "offline",
+            QoS::AtLeastOnce,
+            true,
+        ));
         if let Some((user, pass)) = credentials {
             options.set_credentials(user, pass);
         }
