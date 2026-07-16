@@ -24,23 +24,23 @@ struct Config {
 impl Config {
     fn from_env() -> Result<Self> {
         Ok(Self {
-            ha_url: std::env::var("HVACD_HA_URL")
+            ha_url: std::env::var("HOMEOSTAT_HA_URL")
                 .unwrap_or_else(|_| "ws://127.0.0.1:8123/api/websocket".into()),
-            ha_token: std::env::var("HVACD_HA_TOKEN")
-                .context("HVACD_HA_TOKEN is required (long-lived access token)")?,
-            mqtt_host: std::env::var("HVACD_MQTT_HOST").unwrap_or_else(|_| "127.0.0.1".into()),
-            mqtt_port: std::env::var("HVACD_MQTT_PORT")
+            ha_token: std::env::var("HOMEOSTAT_HA_TOKEN")
+                .context("HOMEOSTAT_HA_TOKEN is required (long-lived access token)")?,
+            mqtt_host: std::env::var("HOMEOSTAT_MQTT_HOST").unwrap_or_else(|_| "127.0.0.1".into()),
+            mqtt_port: std::env::var("HOMEOSTAT_MQTT_PORT")
                 .ok()
                 .and_then(|p| p.parse().ok())
                 .unwrap_or(1883),
             mqtt_credentials: match (
-                std::env::var("HVACD_MQTT_USER"),
-                std::env::var("HVACD_MQTT_PASS"),
+                std::env::var("HOMEOSTAT_MQTT_USER"),
+                std::env::var("HOMEOSTAT_MQTT_PASS"),
             ) {
                 (Ok(user), Ok(pass)) => Some((user, pass)),
                 _ => None,
             },
-            actuate: std::env::var("HVACD_ACTUATE").is_ok_and(|v| v == "1" || v == "true"),
+            actuate: std::env::var("HOMEOSTAT_ACTUATE").is_ok_and(|v| v == "1" || v == "true"),
         })
     }
 }
@@ -50,13 +50,13 @@ async fn main() -> Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "hvacd=info".into()),
+                .unwrap_or_else(|_| "homeostat=info".into()),
         )
         .init();
 
     let config = Config::from_env()?;
     info!(
-        "starting hvacd (actuate={}) -> {}",
+        "starting homeostat (actuate={}) -> {}",
         config.actuate, config.ha_url
     );
     if !config.actuate {

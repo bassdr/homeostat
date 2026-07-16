@@ -11,10 +11,10 @@ use tracing::warn;
 use crate::decide::Desired;
 use crate::state::Inputs;
 
-const TOPIC_STATUS: &str = "hvacd/status";
-const TOPIC_STATE: &str = "hvacd/desired/state";
-const TOPIC_ATTRS: &str = "hvacd/desired/attributes";
-const TOPIC_HEARTBEAT: &str = "hvacd/heartbeat";
+const TOPIC_STATUS: &str = "homeostat/status";
+const TOPIC_STATE: &str = "homeostat/desired/state";
+const TOPIC_ATTRS: &str = "homeostat/desired/attributes";
+const TOPIC_HEARTBEAT: &str = "homeostat/heartbeat";
 
 pub struct Mqtt {
     client: AsyncClient,
@@ -22,7 +22,7 @@ pub struct Mqtt {
 
 impl Mqtt {
     pub async fn connect(host: &str, port: u16, credentials: Option<(String, String)>) -> Result<Self> {
-        let mut options = MqttOptions::new("hvacd", host, port);
+        let mut options = MqttOptions::new("homeostat", host, port);
         options.set_keep_alive(Duration::from_secs(30));
         options.set_last_will(LastWill::new(TOPIC_STATUS, "offline", QoS::AtLeastOnce, true));
         if let Some((user, pass)) = credentials {
@@ -47,12 +47,12 @@ impl Mqtt {
         Ok(mqtt)
     }
 
-    /// MQTT discovery config: creates sensor.hvacd_desired in HA with the
+    /// MQTT discovery config: creates sensor.homeostat_desired in HA with the
     /// decision attributes, marked unavailable whenever the daemon is down.
     async fn publish_discovery(&self) -> Result<()> {
         let config = json!({
-            "name": "hvacd_desired",
-            "unique_id": "hvacd_desired",
+            "name": "homeostat_desired",
+            "unique_id": "homeostat_desired",
             "state_topic": TOPIC_STATE,
             "json_attributes_topic": TOPIC_ATTRS,
             "availability_topic": TOPIC_STATUS,
@@ -60,7 +60,7 @@ impl Mqtt {
         });
         self.client
             .publish(
-                "homeassistant/sensor/hvacd_desired/config",
+                "homeassistant/sensor/homeostat_desired/config",
                 QoS::AtLeastOnce,
                 true,
                 config.to_string(),

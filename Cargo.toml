@@ -1,12 +1,12 @@
 [package]
-name = "hvac-daemon"
+name = "homeostat"
 version = "0.1.0"
 edition = "2021"
-description = "Layered HVAC control daemon for Home Assistant (decision + actuation layers of hvac2)"
+description = "Whole-house energy policy daemon for Home Assistant: decides heating, cooling and load-shedding from occupancy and Hydro-Quebec peak events"
 license = "Apache-2.0"
 
 [[bin]]
-name = "hvacd"
+name = "homeostat"
 path = "src/main.rs"
 
 [dependencies]
