@@ -10,15 +10,6 @@ pub const ENTITY_SEASON: &str = "sensor.homeostat_season";
 pub const ENTITY_AUX_ZONE_OCCUPIED: &str = "binary_sensor.homeostat_aux_zone_occupied";
 pub const ENTITY_COMFORT_SETPOINT: &str = "input_number.homeostat_comfort_setpoint";
 
-/// Entities the daemon writes to (actuation layer).
-pub const ENTITY_MAIN_HVAC: &str = "climate.neviweb130_climate_hvac";
-pub const ENTITY_WATER_HEATER: &str = "switch.waterheater_commutateur";
-pub const AUX_ZONE_THERMOSTATS: [&str; 3] = [
-    "climate.basementbathroom_thermostat",
-    "climate.basementhall_thermostat",
-    "climate.basementmainroom_thermostat",
-];
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Occupancy {
     Home,
