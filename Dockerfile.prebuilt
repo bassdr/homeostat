@@ -1,0 +1,7 @@
+# CI-only: assembles the image from binaries prebuilt with cross (see
+# .github/workflows/release.yml). For a local source build, use Dockerfile.
+FROM scratch
+ARG TARGETPLATFORM
+COPY dist/${TARGETPLATFORM}/homeostat /homeostat
+USER 1000
+ENTRYPOINT ["/homeostat"]
