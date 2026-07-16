@@ -24,10 +24,10 @@ jobs:
         with:
           key: ${{ matrix.target }}
       - run: cross build --release --target ${{ matrix.target }}
-      - run: tar -C target/${{ matrix.target }}/release -czf hvacd-${{ matrix.target }}.tar.gz hvacd
+      - run: tar -C target/${{ matrix.target }}/release -czf homeostat-${{ matrix.target }}.tar.gz homeostat
       - uses: softprops/action-gh-release@v2
         with:
-          files: hvacd-${{ matrix.target }}.tar.gz
+          files: homeostat-${{ matrix.target }}.tar.gz
 
   docker:
     runs-on: ubuntu-latest

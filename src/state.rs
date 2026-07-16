@@ -1,14 +1,14 @@
 //! Layer-1 inputs: the perception enums computed by HA template sensors
-//! (configuration.d/hvac2.yaml). The daemon consumes them as entities and
+//! (configuration.d/homeostat.yaml). The daemon consumes them as entities and
 //! parses them into real types at the boundary — an unknown/unavailable
 //! state clears the slot and suspends decisions instead of acting on junk.
 
 /// Entities the daemon subscribes to (perception layer, computed in HA).
-pub const ENTITY_OCCUPANCY: &str = "sensor.hvac2_occupancy";
-pub const ENTITY_ENERGY_PERIOD: &str = "sensor.hvac2_energy_period";
-pub const ENTITY_SEASON: &str = "sensor.hvac2_season";
-pub const ENTITY_BASEMENT_OCCUPIED: &str = "binary_sensor.hvac2_basement_occupied";
-pub const ENTITY_COMFORT_OVERRIDE: &str = "input_select.hvac2_comfort_override";
+pub const ENTITY_OCCUPANCY: &str = "sensor.homeostat_occupancy";
+pub const ENTITY_ENERGY_PERIOD: &str = "sensor.homeostat_energy_period";
+pub const ENTITY_SEASON: &str = "sensor.homeostat_season";
+pub const ENTITY_BASEMENT_OCCUPIED: &str = "binary_sensor.homeostat_basement_occupied";
+pub const ENTITY_COMFORT_OVERRIDE: &str = "input_select.homeostat_comfort_override";
 
 /// Entities the daemon writes to (actuation layer).
 pub const ENTITY_MAIN_HVAC: &str = "climate.neviweb130_climate_hvac";
