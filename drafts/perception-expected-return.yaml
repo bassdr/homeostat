@@ -7,10 +7,22 @@
 # (state.rs::Occupancy::derive). decide() and its matrix are untouched.
 #
 #   sensor.homeostat_occupancy    home / home_asleep / away   (3 states)
-#   sensor.homeostat_return_eta   credible estimate, minutes; 0 = no estimate
-#                                 (nav ETA > manual/calendar > none)
-#   sensor.homeostat_return_floor physical lower bound, minutes, from GPS
-#                                 distance at 100 km/h; 0 = vacuous floor
+#   binary_sensor.homeostat_heading_home  confirmed en route (car navigating
+#                                 home AND the car is with David)
+#   sensor.homeostat_return_floor earliest possible arrival, minutes: phone
+#                                 travel time home (traffic-aware: ~20 min at
+#                                 night, 45-60 at rush hour), distance at
+#                                 100 km/h as fallback; 0 = vacuous floor
+#   sensor.homeostat_return_eta   credible estimate, minutes; 0 = no estimate.
+#                                 Confirmed heading home means "worst case,
+#                                 home in floor minutes" so the floor is the
+#                                 estimate; otherwise manual/calendar; else 0.
+#
+# The car's position deliberately does NOT tighten the floor: a lower bound
+# stays true whether or not the car is with David (nobody gets him home
+# faster than a car ride). It only guards heading_home - car nav means
+# "David returning" only when the car is with him, not when someone else
+# drives it home.
 #
 # Both time sensors are rounded to 5 min: templates referencing now() re-render
 # every minute, so bucket transitions reach the daemon as ordinary state
@@ -20,7 +32,10 @@
 # NOT part of configuration.d - merging this into the live package means:
 #   1. replace the occupancy sensor with the version below
 #   2. add the two return sensors and the input_datetime
-#   3. delete binary_sensor.homeostat_returning_home (folded into return_eta)
+#   3. delete binary_sensor.homeostat_returning_home (superseded by
+#      homeostat_heading_home) and add the Waze travel-time integration
+#      (origin person.david_racine, destination zone.home) as
+#      sensor.david_time_to_home for the traffic-aware floor
 #   4. delete input_number.homeostat_away_far_distance (policy moved to the
 #      daemon: FAR_MIN in state.rs; note far now starts at ~200 km on
 #      distance data alone, vs the old knob's 100 km default)
@@ -61,17 +76,52 @@ template:
             {% endif %}
           {% endif %}
 
+  - binary_sensor:
+      - name: homeostat_heading_home
+        unique_id: homeostat_heading_home
+        icon: mdi:home-import-outline
+        # confirmed en route, not merely nearby: the car is navigating home
+        # AND the car is with David (unknown car/person position fails the
+        # guard - never confirm returning on missing data). Sources are
+        # OR'ed; add more as they prove out (companion-app driving
+        # detection + proximity direction, transit apps).
+        state: >
+          {{ is_state('device_tracker.pointer_route', 'home')
+             and distance('device_tracker.pointer_location', 'person.david_racine')
+                 | float(999) < 1 }}
+
+  - sensor:
+      - name: homeostat_return_floor
+        unique_id: homeostat_return_floor
+        unit_of_measurement: min
+        state_class: measurement
+        icon: mdi:map-marker-distance
+        # earliest possible arrival. Primary: live travel time home for
+        # David's phone (Waze integration, knows night vs rush hour).
+        # Fallback: distance / 100 km/h. Floored to 5 min (a lower bound
+        # must round down to stay true); unknown GPS gives 0, the vacuously
+        # true floor.
+        state: >
+          {% set travel = states('sensor.david_time_to_home') | float(0) %}
+          {% if travel > 0 %}
+            {{ (travel / 5) | round(0, 'floor') * 5 }}
+          {% else %}
+            {{ (distance('zone.home', 'person.david_racine') | float(0)
+                * 60 / 100 / 5) | round(0, 'floor') * 5 }}
+          {% endif %}
+
       - name: homeostat_return_eta
         unique_id: homeostat_return_eta
         unit_of_measurement: min
         state_class: measurement
         icon: mdi:home-clock-outline
-        # 0 = no estimate (same convention as the comfort hold). Real
-        # estimates are ceiled to 5 min so they can never collapse to 0.
+        # 0 = no estimate (same convention as the comfort hold). Confirmed
+        # heading home = "worst case, home in floor minutes", so the floor
+        # is the estimate; real estimates are held at >= 5 min so they can
+        # never collapse to 0.
         state: >
-          {% set nav = states('sensor.pointer_time_to_arrival') | float(0) %}
-          {% if is_state('device_tracker.pointer_route', 'home') and nav > 0 %}
-            {{ (nav / 5) | round(0, 'ceil') * 5 }}
+          {% if is_state('binary_sensor.homeostat_heading_home', 'on') %}
+            {{ [states('sensor.homeostat_return_floor') | float(0), 5] | max }}
           {% else %}
             {% set manual_ts = state_attr('input_datetime.homeostat_expected_return', 'timestamp') | float(0) %}
             {% set mins = (manual_ts - now().timestamp()) / 60 %}
@@ -83,24 +133,11 @@ template:
           {% endif %}
         attributes:
           source: >
-            {% if is_state('device_tracker.pointer_route', 'home')
-                  and states('sensor.pointer_time_to_arrival') | float(0) > 0 %}
-              nav
+            {% if is_state('binary_sensor.homeostat_heading_home', 'on') %}
+              heading_home
             {% elif (state_attr('input_datetime.homeostat_expected_return', 'timestamp') | float(0))
                     > now().timestamp() %}
               manual
             {% else %}
               none
             {% endif %}
-
-      - name: homeostat_return_floor
-        unique_id: homeostat_return_floor
-        unit_of_measurement: min
-        state_class: measurement
-        icon: mdi:map-marker-distance
-        # you cannot be home sooner than distance / 100 km/h. Floored to
-        # 5 min (a lower bound must round down to stay true); unknown GPS
-        # gives 0, the vacuously true floor.
-        state: >
-          {{ (distance('zone.home', 'person.david_racine') | float(0)
-              * 60 / 100 / 5) | round(0, 'floor') * 5 }}
