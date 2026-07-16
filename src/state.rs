@@ -56,14 +56,18 @@ pub enum Occupancy {
 impl Occupancy {
     /// Classify away-ness from time-until-return. Two perception facts:
     ///
-    /// - `return_eta_min`: a credible estimate (nav ETA, manual/calendar);
-    ///   0 = no estimate (same convention as the comfort hold).
-    /// - `return_floor_min`: physical lower bound from GPS distance; always
-    ///   valid, 0 when unknown (a floor of zero is vacuously true).
+    /// - `return_eta_min`: a credible estimate; 0 = no estimate (the
+    ///   comfort-hold convention). Perception emits one only when return is
+    ///   confirmed (heading home: worst case, home in floor minutes) or
+    ///   announced (manual/calendar).
+    /// - `return_floor_min`: earliest possible arrival (phone travel time,
+    ///   or GPS distance at highway speed); always valid, 0 when unknown
+    ///   (a floor of zero is vacuously true).
     ///
-    /// The floor caps optimism (`max`): a nav ETA that contradicts raw
-    /// distance is stale. Returning requires a positive estimate - a small
-    /// *floor* only means "could be nearby", not "is coming back".
+    /// The floor caps optimism (`max`): an estimate that contradicts it is
+    /// stale. Returning requires a positive estimate - a small *floor* only
+    /// means "could be nearby" (20 min from the girlfriend's couch), never
+    /// "is coming back".
     pub fn derive(presence: Presence, return_eta_min: f64, return_floor_min: f64) -> Self {
         match presence {
             Presence::Home => Self::Home,
