@@ -10,6 +10,8 @@ env:
 jobs:
   binaries:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write # create/update the release and attach binaries
     strategy:
       matrix:
         target:
