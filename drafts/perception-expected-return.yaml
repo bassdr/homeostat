@@ -59,8 +59,9 @@ input_number:
     # measured, not guessed: 43 sustained recovery episodes (>=2 h of solid
     # heating) in the hourly stats of sensor.hvac_t across winter 2025-26
     # (the new HVAC's first winter) fit rate = 1.38 + 0.015 * T_out C/h -
-    # 1.4 at freezing, 1.2 at -10, ~1.0 at -25 (extrapolated; matches the
-    # lived 'stage 2 barely compensates at -25'). This knob is the 0C
+    # 1.4 at freezing, 1.2 at -10 (a usual Montreal winter day), ~1.1 at
+    # -20 (solid cold; edge of the measured range - matches the lived
+    # 'lower stages cannot compensate, stage 2 at least'). This knob is the 0C
     # intercept; the slope lives in the recovery_minutes template. Short
     # bursts run hotter (22->24 in ~40 min) but hourly means smear them,
     # and the sustained rate is the conservative planning number anyway:
