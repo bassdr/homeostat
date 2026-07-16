@@ -1,11 +1,35 @@
 # homeostat — whole-house energy policy daemon for Home Assistant
 
-Holds the house in equilibrium (Ashby, 1948): Rust implementation of the decision and actuation layers (see
-`configuration.d/homeostat.yaml` in the HA config repo). The perception layer
-(occupancy / energy period / season enums) stays in HA as template sensors;
-this daemon subscribes to them, runs the decision matrix as a pure function,
-publishes the decision back as `sensor.homeostat_desired` via MQTT discovery,
-and (when enabled) actuates the physical devices.
+Holds the house in equilibrium (after [Ashby's homeostat](https://en.wikipedia.org/wiki/Homeostat),
+1948). The daemon subscribes to a small set of *perception entities* you
+define in Home Assistant, runs a decision matrix as a pure, unit-tested
+function, publishes its decision back as `sensor.homeostat_desired` via MQTT
+discovery, and (once enabled) actuates the physical devices.
+
+## The perception contract
+
+homeostat is utility- and hardware-agnostic. You provide five entities in HA
+(template sensors, integrations, whatever you like — see
+`configuration.d/homeostat.yaml` in the author's config for a worked example
+using an alarm panel, motion sensors, a Tesla's ETA, and Hydro-Québec's
+open-data peak feed):
+
+| Entity                                    | Values                                            |
+|-------------------------------------------|---------------------------------------------------|
+| `sensor.homeostat_occupancy`               | `home` `home_asleep` `returning` `away` `away_far` |
+| `sensor.homeostat_energy_period`           | `normal` `preheat` `peak`                          |
+| `sensor.homeostat_season`                  | `heat` `fan` `cool`                                |
+| `binary_sensor.homeostat_basement_occupied`| `on` / `off`                                       |
+| `input_select.homeostat_comfort_override`  | `none` `too_cold` `too_hot`                        |
+
+`energy_period` abstracts any demand-response program (Hydro-Québec winter
+credit, Tempo, Octopus events, a plain time-of-use schedule). If any input
+is `unknown`/`unavailable`, homeostat holds its last decision rather than
+acting on garbage.
+
+The actuated entities (main thermostat, zone heaters, water heater switch)
+are currently constants in `src/state.rs` — fork and adjust, or open an
+issue if you want them configurable.
 
 ## Design invariants
 
