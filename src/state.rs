@@ -7,13 +7,13 @@
 pub const ENTITY_OCCUPANCY: &str = "sensor.homeostat_occupancy";
 pub const ENTITY_ENERGY_PERIOD: &str = "sensor.homeostat_energy_period";
 pub const ENTITY_SEASON: &str = "sensor.homeostat_season";
-pub const ENTITY_BASEMENT_OCCUPIED: &str = "binary_sensor.homeostat_basement_occupied";
+pub const ENTITY_AUX_ZONE_OCCUPIED: &str = "binary_sensor.homeostat_aux_zone_occupied";
 pub const ENTITY_COMFORT_OVERRIDE: &str = "input_select.homeostat_comfort_override";
 
 /// Entities the daemon writes to (actuation layer).
 pub const ENTITY_MAIN_HVAC: &str = "climate.neviweb130_climate_hvac";
 pub const ENTITY_WATER_HEATER: &str = "switch.waterheater_commutateur";
-pub const BASEMENT_THERMOSTATS: [&str; 3] = [
+pub const AUX_ZONE_THERMOSTATS: [&str; 3] = [
     "climate.basementbathroom_thermostat",
     "climate.basementhall_thermostat",
     "climate.basementmainroom_thermostat",
@@ -23,7 +23,7 @@ pub const BASEMENT_THERMOSTATS: [&str; 3] = [
 pub enum Occupancy {
     Home,
     HomeAsleep,
-    Returning,
+    AwayReturning,
     Away,
     AwayFar,
 }
@@ -33,7 +33,7 @@ impl Occupancy {
         match s {
             "home" => Some(Self::Home),
             "home_asleep" => Some(Self::HomeAsleep),
-            "returning" => Some(Self::Returning),
+            "away_returning" => Some(Self::AwayReturning),
             "away" => Some(Self::Away),
             "away_far" => Some(Self::AwayFar),
             _ => None,
@@ -110,7 +110,7 @@ pub struct Inputs {
     pub occupancy: Occupancy,
     pub energy_period: EnergyPeriod,
     pub season: Season,
-    pub basement_occupied: bool,
+    pub aux_zone_occupied: bool,
     pub comfort_override: ComfortOverride,
 }
 
@@ -121,7 +121,7 @@ pub struct RawInputs {
     occupancy: Option<Occupancy>,
     energy_period: Option<EnergyPeriod>,
     season: Option<Season>,
-    basement_occupied: Option<bool>,
+    aux_zone_occupied: Option<bool>,
     comfort_override: Option<ComfortOverride>,
 }
 
@@ -133,8 +133,8 @@ impl RawInputs {
             ENTITY_OCCUPANCY => Self::set(&mut self.occupancy, Occupancy::parse(state)),
             ENTITY_ENERGY_PERIOD => Self::set(&mut self.energy_period, EnergyPeriod::parse(state)),
             ENTITY_SEASON => Self::set(&mut self.season, Season::parse(state)),
-            ENTITY_BASEMENT_OCCUPIED => Self::set(
-                &mut self.basement_occupied,
+            ENTITY_AUX_ZONE_OCCUPIED => Self::set(
+                &mut self.aux_zone_occupied,
                 match state {
                     "on" => Some(true),
                     "off" => Some(false),
@@ -162,7 +162,7 @@ impl RawInputs {
             occupancy: self.occupancy?,
             energy_period: self.energy_period?,
             season: self.season?,
-            basement_occupied: self.basement_occupied?,
+            aux_zone_occupied: self.aux_zone_occupied?,
             comfort_override: self.comfort_override?,
         })
     }

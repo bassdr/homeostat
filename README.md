@@ -16,10 +16,10 @@ open-data peak feed):
 
 | Entity                                    | Values                                            |
 |-------------------------------------------|---------------------------------------------------|
-| `sensor.homeostat_occupancy`               | `home` `home_asleep` `returning` `away` `away_far` |
+| `sensor.homeostat_occupancy`               | `home` `home_asleep` `away_returning` `away` `away_far` |
 | `sensor.homeostat_energy_period`           | `normal` `preheat` `peak`                          |
 | `sensor.homeostat_season`                  | `heat` `fan` `cool`                                |
-| `binary_sensor.homeostat_basement_occupied`| `on` / `off`                                       |
+| `binary_sensor.homeostat_aux_zone_occupied`| `on` / `off`                                       |
 | `input_select.homeostat_comfort_override`  | `none` `too_cold` `too_hot`                        |
 
 `energy_period` abstracts any demand-response program (Hydro-Québec winter

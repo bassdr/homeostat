@@ -80,7 +80,7 @@ impl Mqtt {
             "main_mode": desired.main_mode.as_str(),
             "main_setpoint": desired.main_setpoint,
             "fan_mode": desired.fan_mode.as_str(),
-            "basement_setpoint": desired.basement_setpoint,
+            "aux_zone_setpoint": desired.aux_zone_setpoint,
             "water_heater": if desired.water_heater_on { "on" } else { "off" },
             "inputs": format!("{inputs:?}"),
         });

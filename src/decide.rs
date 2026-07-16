@@ -5,7 +5,7 @@
 //! incident cannot compile.
 
 use crate::state::{
-    EnergyPeriod, Inputs, Occupancy, Season, BASEMENT_THERMOSTATS, ENTITY_MAIN_HVAC,
+    EnergyPeriod, Inputs, Occupancy, Season, AUX_ZONE_THERMOSTATS, ENTITY_MAIN_HVAC,
     ENTITY_WATER_HEATER,
 };
 use serde_json::json;
@@ -48,7 +48,7 @@ pub struct Desired {
     pub main_setpoint: f64,
     pub fan_mode: FanMode,
     /// None = basement thermostats off (cooling season).
-    pub basement_setpoint: Option<f64>,
+    pub aux_zone_setpoint: Option<f64>,
     pub water_heater_on: bool,
 }
 
@@ -67,7 +67,7 @@ pub fn decide(i: &Inputs) -> Desired {
         Cool => match i.occupancy {
             Home => 25.0,
             HomeAsleep => 24.0,
-            Returning => 26.0,
+            AwayReturning => 26.0,
             Away | AwayFar => 28.0,
         },
         // In fan season the setpoint is not applied (mode off) but is still
@@ -75,17 +75,17 @@ pub fn decide(i: &Inputs) -> Desired {
         Heat | Fan => match (i.energy_period, i.occupancy) {
             (Normal, Home) => 22.5,
             (Normal, HomeAsleep) => 22.5,
-            (Normal, Returning) => 21.0,
+            (Normal, AwayReturning) => 21.0,
             (Normal, Away) => 19.0,
             (Normal, AwayFar) => 17.0,
             (Preheat, Home) => 25.0,
             (Preheat, HomeAsleep) => 24.0,
-            (Preheat, Returning) => 25.0,
+            (Preheat, AwayReturning) => 25.0,
             (Preheat, Away) => 23.0,
             (Preheat, AwayFar) => 21.0,
             (Peak, Home) => 16.0,
             (Peak, HomeAsleep) => 16.0,
-            (Peak, Returning) => 13.0,
+            (Peak, AwayReturning) => 13.0,
             (Peak, Away) => 12.0,
             (Peak, AwayFar) => 10.0,
         },
@@ -97,18 +97,18 @@ pub fn decide(i: &Inputs) -> Desired {
         FanMode::Auto
     };
 
-    let basement_setpoint = match (i.season, i.energy_period) {
+    let aux_zone_setpoint = match (i.season, i.energy_period) {
         (Cool, _) => None,
         (_, Peak) => Some(5.0),
         (_, Preheat) => Some(26.0),
-        (_, Normal) => Some(if i.basement_occupied { 19.0 } else { 16.0 }),
+        (_, Normal) => Some(if i.aux_zone_occupied { 19.0 } else { 16.0 }),
     };
 
     Desired {
         main_mode,
         main_setpoint,
         fan_mode,
-        basement_setpoint,
+        aux_zone_setpoint,
         water_heater_on: i.energy_period != Peak,
     }
 }
@@ -160,9 +160,9 @@ pub fn plan_main_hvac(d: &Desired, i: &Inputs) -> Vec<ServiceCall> {
     plan
 }
 
-pub fn plan_basement(d: &Desired) -> Vec<ServiceCall> {
-    let thermostats = BASEMENT_THERMOSTATS.to_vec();
-    match d.basement_setpoint {
+pub fn plan_aux_zone(d: &Desired) -> Vec<ServiceCall> {
+    let thermostats = AUX_ZONE_THERMOSTATS.to_vec();
+    match d.aux_zone_setpoint {
         None => vec![ServiceCall::climate("turn_off", thermostats, json!({}))],
         Some(t) => vec![
             ServiceCall::climate("turn_on", thermostats.clone(), json!({})),
@@ -183,7 +183,7 @@ pub fn plan_water_heater(d: &Desired) -> Vec<ServiceCall> {
 /// Full actuation plan for a decision.
 pub fn plan_all(d: &Desired, i: &Inputs) -> Vec<ServiceCall> {
     let mut plan = plan_main_hvac(d, i);
-    plan.extend(plan_basement(d));
+    plan.extend(plan_aux_zone(d));
     plan.extend(plan_water_heater(d));
     plan
 }
@@ -198,7 +198,7 @@ mod tests {
             occupancy,
             energy_period,
             season,
-            basement_occupied: false,
+            aux_zone_occupied: false,
             comfort_override: ComfortOverride::None,
         }
     }
@@ -230,17 +230,17 @@ mod tests {
         let d = decide(&i);
         assert!(!d.water_heater_on);
         assert_eq!(d.main_setpoint, 16.0);
-        assert_eq!(d.basement_setpoint, Some(5.0));
+        assert_eq!(d.aux_zone_setpoint, Some(5.0));
     }
 
     #[test]
     fn returning_gets_milder_peak_and_richer_preheat_than_away() {
         let away_peak = decide(&inputs(Occupancy::Away, EnergyPeriod::Peak, Season::Heat));
-        let ret_peak = decide(&inputs(Occupancy::Returning, EnergyPeriod::Peak, Season::Heat));
+        let ret_peak = decide(&inputs(Occupancy::AwayReturning, EnergyPeriod::Peak, Season::Heat));
         assert!(ret_peak.main_setpoint > away_peak.main_setpoint);
 
         let away_pre = decide(&inputs(Occupancy::Away, EnergyPeriod::Preheat, Season::Heat));
-        let ret_pre = decide(&inputs(Occupancy::Returning, EnergyPeriod::Preheat, Season::Heat));
+        let ret_pre = decide(&inputs(Occupancy::AwayReturning, EnergyPeriod::Preheat, Season::Heat));
         assert!(ret_pre.main_setpoint > away_pre.main_setpoint);
     }
 
@@ -270,12 +270,12 @@ mod tests {
     }
 
     #[test]
-    fn basement_follows_occupancy_and_cool_season_turns_it_off() {
+    fn aux_zone_follows_occupancy_and_cool_season_turns_it_off() {
         let mut i = inputs(Occupancy::Home, EnergyPeriod::Normal, Season::Heat);
-        assert_eq!(decide(&i).basement_setpoint, Some(16.0));
-        i.basement_occupied = true;
-        assert_eq!(decide(&i).basement_setpoint, Some(19.0));
+        assert_eq!(decide(&i).aux_zone_setpoint, Some(16.0));
+        i.aux_zone_occupied = true;
+        assert_eq!(decide(&i).aux_zone_setpoint, Some(19.0));
         i.season = Season::Cool;
-        assert_eq!(decide(&i).basement_setpoint, None);
+        assert_eq!(decide(&i).aux_zone_setpoint, None);
     }
 }
