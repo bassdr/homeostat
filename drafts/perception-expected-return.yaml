@@ -54,16 +54,33 @@
 # =============================================================================
 
 input_number:
+  homeostat_recovery_rate:
+    name: Homeostat recovery rate
+    # measured, not guessed: hourly stats of sensor.hvac_t across winter
+    # 2025-26 (the new HVAC's first winter) show sustained recovery
+    # episodes at a median 1.22 C/h (p90 single hour 1.64, absolute best
+    # 2.34). David's stage telemetry (input_number.hvac_dt, C/h) is the
+    # live counterpart; this knob is the planning value derived from its
+    # history. Conservative on purpose: overestimating the rate means
+    # arriving to a cold house.
+    min: 0.5
+    max: 4.5
+    step: 0.1
+    initial: 1.2
+    unit_of_measurement: °C/h
+    icon: mdi:thermometer-chevron-up
+
   homeostat_recovery_hours:
     name: Homeostat recovery horizon
     # worst-case hours for the house to recover to livable on its own after
-    # a fully-shed peak (10C trough took 5-6 h, experimented). Used by
+    # a fully-shed peak. At the measured 1.2 C/h a 9 C deficit (10 -> 19)
+    # is ~7.5 h; David's lived estimate was 5-6 h. Used by
     # back_during_recovery below; the per-arrival lead is computed from the
     # live temperature instead (recovery_minutes).
     min: 0
     max: 12
     step: 0.5
-    initial: 5
+    initial: 6
     unit_of_measurement: h
     icon: mdi:clock-end
 
@@ -198,9 +215,10 @@ template:
         icon: mdi:thermometer-chevron-up
         # time to bring the main zone back to livable (19C, not full
         # comfort - finishing the warm-up while home is acceptable) at the
-        # empirical whole-house rate: 12C of deficit took 5-6h => ~30
-        # min/C. Warm house (>= 19C) = 0: the daemon then applies its plain
-        # ~20 min comfort pre-start.
+        # measured recovery rate (see homeostat_recovery_rate). Warm house
+        # (>= 19C) = 0: the daemon then applies its plain ~20 min comfort
+        # pre-start.
         state: >
           {% set t = state_attr('climate.neviweb130_climate_hvac', 'current_temperature') | float(19) %}
-          {{ ([(19 - t) * 30, 0] | max / 5) | round(0, 'ceil') * 5 }}
+          {% set rate = states('input_number.homeostat_recovery_rate') | float(1.2) %}
+          {{ ([(19 - t) * 60 / rate, 0] | max / 5) | round(0, 'ceil') * 5 }}
