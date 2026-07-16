@@ -160,6 +160,54 @@ mod tests {
         }
     }
 
+    /// Hard safety invariant: indoor anywhere near 0C risks breaking the
+    /// house (pipes - at -20 outside a drop can run -5C/h once shed). The
+    /// protection is that every reachable decision, however aggressive the
+    /// shed, commands a setpoint the thermostats will defend: >= 10C on the
+    /// main zone in any heating-capable season, >= 5C (the Sinope frost
+    /// floor) on the aux zone. Burning peak kWh to hold that line is
+    /// always the right trade - breakage costs more than credit.
+    #[test]
+    fn no_decision_ever_commands_anywhere_near_freezing() {
+        use EnergyPeriod::*;
+        use Occupancy::*;
+        use Season::*;
+
+        for season in [Heat, Fan, Cool] {
+            for energy_period in [Normal, Preheat, Peak] {
+                for occupancy in [Home, HomeAsleep, AwayReturning, Away, AwayFar] {
+                    for back_during_recovery in [true, false] {
+                        for aux_zone_occupied in [true, false] {
+                            for comfort_setpoint in [0.0, 5.0, 29.0] {
+                                let i = Inputs {
+                                    occupancy,
+                                    energy_period,
+                                    season,
+                                    aux_zone_occupied,
+                                    comfort_setpoint,
+                                    back_during_recovery,
+                                };
+                                let d = decide(&i);
+                                if season != Cool {
+                                    assert!(
+                                        d.main_setpoint >= 10.0,
+                                        "main-zone freeze floor violated: {i:?} -> {d:?}"
+                                    );
+                                }
+                                if let Some(aux) = d.aux_zone_setpoint {
+                                    assert!(
+                                        aux >= 5.0,
+                                        "aux-zone freeze floor violated: {i:?} -> {d:?}"
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     /// Regression test for the 2026-07-07 incident: leaving home on a hot day
     /// with the physical HVAC manually set to cool@26. The old system pushed
     /// a 19C *heat* setpoint onto the device without changing its mode,
