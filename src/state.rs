@@ -11,6 +11,8 @@ pub const ENTITY_AUX_ZONE_OCCUPIED: &str = "binary_sensor.homeostat_aux_zone_occ
 pub const ENTITY_COMFORT_SETPOINT: &str = "input_number.homeostat_comfort_setpoint";
 pub const ENTITY_RETURN_ETA: &str = "sensor.homeostat_return_eta";
 pub const ENTITY_RETURN_FLOOR: &str = "sensor.homeostat_return_floor";
+pub const ENTITY_BACK_DURING_RECOVERY: &str = "binary_sensor.homeostat_back_during_recovery";
+pub const ENTITY_RECOVERY_MINUTES: &str = "sensor.homeostat_recovery_minutes";
 
 /// What the occupancy sensor now publishes: presence facts only. The
 /// away_returning/away_far distinction moved out of perception - it is
@@ -35,9 +37,11 @@ impl Presence {
     }
 }
 
-/// Minutes-until-return below which an away house is treated as "returning"
-/// (start recovery). Matches the old nav rule of ETA < 60 min.
-const RETURNING_LEAD_MIN: f64 = 60.0;
+/// Minutes-until-return below which an away house is treated as "returning".
+/// This is the comfort pre-start (heater/cooler on ~20 min before arrival;
+/// finishing the warm-up while home is acceptable). From a cold house the
+/// lead is stretched by the recovery estimate instead - see `derive`.
+const RETURNING_LEAD_MIN: f64 = 20.0;
 /// Minutes-until-return at or beyond which the deep away_far setback
 /// applies ("cannot be back within a couple of hours"). Note: from the
 /// distance floor alone (100 km/h assumed) this kicks in at ~200 km,
@@ -68,17 +72,32 @@ impl Occupancy {
     /// stale. Returning requires a positive estimate - a small *floor* only
     /// means "could be nearby" (20 min from the girlfriend's couch), never
     /// "is coming back".
-    pub fn derive(presence: Presence, return_eta_min: f64, return_floor_min: f64) -> Self {
+    ///
+    /// `recovery_min` is how long the house needs to warm back to *livable*
+    /// (not full comfort) from its current temperature (perception
+    /// estimates it; 0 = warm enough or unknown). It stretches the
+    /// returning lead: from a deep-cold cycle (12C after a shed peak)
+    /// recovery takes hours, and arriving anywhere inside that window to a
+    /// cold house is a comfort failure - so the returning check runs first
+    /// and outranks Far. From the normal 19C away baseline it contributes
+    /// nothing and the plain comfort pre-start applies.
+    pub fn derive(
+        presence: Presence,
+        return_eta_min: f64,
+        return_floor_min: f64,
+        recovery_min: f64,
+    ) -> Self {
         match presence {
             Presence::Home => Self::Home,
             Presence::HomeAsleep => Self::HomeAsleep,
             Presence::Away => {
                 let has_estimate = return_eta_min > 0.0;
                 let expected = return_eta_min.max(return_floor_min);
-                if expected >= FAR_MIN {
-                    Self::AwayFar
-                } else if has_estimate && expected <= RETURNING_LEAD_MIN {
+                let lead = recovery_min.max(RETURNING_LEAD_MIN);
+                if has_estimate && expected <= lead {
                     Self::AwayReturning
+                } else if expected >= FAR_MIN {
+                    Self::AwayFar
                 } else {
                     Self::Away
                 }
@@ -136,6 +155,11 @@ pub struct Inputs {
     pub aux_zone_occupied: bool,
     /// Manual hold: absolute setpoint in degrees C; 0 = none (automatic).
     pub comfort_setpoint: f64,
+    /// Someone is expected home during the grid event or within the
+    /// recovery horizon after it ends. Unknown = true: the comfort-safe
+    /// default is a normal preheat; the bare-preheat saving needs positive
+    /// evidence of absence (calendar/manual estimate, or a huge floor).
+    pub back_during_recovery: bool,
 }
 
 /// Accumulates entity states as they arrive; yields `Inputs` only once every
@@ -152,6 +176,10 @@ pub struct RawInputs {
     comfort_setpoint: f64,
     return_eta_min: f64,
     return_floor_min: f64,
+    recovery_min: f64,
+    /// Optional with an asymmetric default: unknown means "assume someone
+    /// will be back" (normal preheat, the comfort-safe direction).
+    back_during_recovery: Option<bool>,
 }
 
 impl RawInputs {
@@ -173,6 +201,15 @@ impl RawInputs {
             ENTITY_COMFORT_SETPOINT => Self::set_f64(&mut self.comfort_setpoint, state),
             ENTITY_RETURN_ETA => Self::set_f64(&mut self.return_eta_min, state),
             ENTITY_RETURN_FLOOR => Self::set_f64(&mut self.return_floor_min, state),
+            ENTITY_RECOVERY_MINUTES => Self::set_f64(&mut self.recovery_min, state),
+            ENTITY_BACK_DURING_RECOVERY => Self::set(
+                &mut self.back_during_recovery,
+                match state {
+                    "on" => Some(true),
+                    "off" => Some(false),
+                    _ => None,
+                },
+            ),
             _ => false,
         }
     }
@@ -202,11 +239,13 @@ impl RawInputs {
                 self.presence?,
                 self.return_eta_min,
                 self.return_floor_min,
+                self.recovery_min,
             ),
             energy_period: self.energy_period?,
             season: self.season?,
             aux_zone_occupied: self.aux_zone_occupied?,
             comfort_setpoint: self.comfort_setpoint,
+            back_during_recovery: self.back_during_recovery.unwrap_or(true),
         })
     }
 }
@@ -260,28 +299,46 @@ mod tests {
         use Presence::Away as PAway;
 
         // presence at home ignores the return sensors entirely
-        assert_eq!(Occupancy::derive(Presence::Home, 30.0, 0.0), Home);
+        assert_eq!(Occupancy::derive(Presence::Home, 30.0, 0.0, 0.0), Home);
         assert_eq!(
-            Occupancy::derive(Presence::HomeAsleep, 0.0, 500.0),
+            Occupancy::derive(Presence::HomeAsleep, 0.0, 500.0, 0.0),
             HomeAsleep
         );
 
-        // a credible estimate within the recovery lead = returning,
-        // inclusive at the boundary (the old nav rule was ETA < 60)
-        assert_eq!(Occupancy::derive(PAway, 45.0, 0.0), AwayReturning);
-        assert_eq!(Occupancy::derive(PAway, 60.0, 0.0), AwayReturning);
-        assert_eq!(Occupancy::derive(PAway, 90.0, 0.0), Away);
-        assert_eq!(Occupancy::derive(PAway, 240.0, 0.0), AwayFar);
+        // a credible estimate within the comfort pre-start = returning,
+        // inclusive at the boundary
+        assert_eq!(Occupancy::derive(PAway, 15.0, 0.0, 0.0), AwayReturning);
+        assert_eq!(Occupancy::derive(PAway, 20.0, 0.0, 0.0), AwayReturning);
+        assert_eq!(Occupancy::derive(PAway, 45.0, 0.0, 0.0), Away);
+        assert_eq!(Occupancy::derive(PAway, 240.0, 0.0, 0.0), AwayFar);
 
         // no estimate: never returning; plain away unless the physical
         // floor proves the deep setback is safe
-        assert_eq!(Occupancy::derive(PAway, 0.0, 0.0), Away);
-        assert_eq!(Occupancy::derive(PAway, 0.0, 45.0), Away);
-        assert_eq!(Occupancy::derive(PAway, 0.0, 180.0), AwayFar);
+        assert_eq!(Occupancy::derive(PAway, 0.0, 0.0, 0.0), Away);
+        assert_eq!(Occupancy::derive(PAway, 0.0, 45.0, 0.0), Away);
+        assert_eq!(Occupancy::derive(PAway, 0.0, 180.0, 0.0), AwayFar);
 
         // the floor caps a stale optimistic estimate
-        assert_eq!(Occupancy::derive(PAway, 30.0, 180.0), AwayFar);
-        assert_eq!(Occupancy::derive(PAway, 30.0, 90.0), Away);
+        assert_eq!(Occupancy::derive(PAway, 15.0, 180.0, 0.0), AwayFar);
+        assert_eq!(Occupancy::derive(PAway, 15.0, 90.0, 0.0), Away);
+    }
+
+    #[test]
+    fn cold_house_stretches_the_returning_lead() {
+        use Occupancy::*;
+        use Presence::Away as PAway;
+
+        // house at 12C after a shed peak: recovery ~210 min. Returning
+        // must engage hours out - even from "far" - or the arrival lands
+        // in a cold house; recovery outranks the far setback.
+        assert_eq!(Occupancy::derive(PAway, 180.0, 0.0, 210.0), AwayReturning);
+        assert_eq!(Occupancy::derive(PAway, 180.0, 170.0, 210.0), AwayReturning);
+        // beyond the stretched lead the normal buckets apply
+        assert_eq!(Occupancy::derive(PAway, 240.0, 0.0, 210.0), AwayFar);
+        // no estimate: a cold house alone never fakes a return
+        assert_eq!(Occupancy::derive(PAway, 0.0, 0.0, 210.0), Away);
+        // warm house: the lead is the plain comfort pre-start
+        assert_eq!(Occupancy::derive(PAway, 45.0, 0.0, 0.0), Away);
     }
 
     #[test]
@@ -293,9 +350,29 @@ mod tests {
         raw.ingest(ENTITY_AUX_ZONE_OCCUPIED, "off");
         raw.ingest(ENTITY_RETURN_ETA, "unavailable");
         raw.ingest(ENTITY_RETURN_FLOOR, "unknown");
+        raw.ingest(ENTITY_RECOVERY_MINUTES, "unavailable");
         let inputs = raw
             .complete()
             .expect("optional inputs must not suspend decisions");
         assert_eq!(inputs.occupancy, Occupancy::Away, "no data = conservative");
+    }
+
+    #[test]
+    fn unknown_back_during_recovery_defaults_to_assuming_a_return() {
+        let mut raw = RawInputs::default();
+        raw.ingest(ENTITY_OCCUPANCY, "away");
+        raw.ingest(ENTITY_ENERGY_PERIOD, "preheat");
+        raw.ingest(ENTITY_SEASON, "heat");
+        raw.ingest(ENTITY_AUX_ZONE_OCCUPIED, "off");
+        let inputs = raw.complete().unwrap();
+        assert!(
+            inputs.back_during_recovery,
+            "unknown must fail toward the comfort-safe normal preheat"
+        );
+
+        raw.ingest(ENTITY_BACK_DURING_RECOVERY, "off");
+        assert!(!raw.complete().unwrap().back_during_recovery);
+        raw.ingest(ENTITY_BACK_DURING_RECOVERY, "unavailable");
+        assert!(raw.complete().unwrap().back_during_recovery);
     }
 }
