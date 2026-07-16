@@ -1,0 +1,21 @@
+[package]
+name = "hvac-daemon"
+version = "0.1.0"
+edition = "2021"
+description = "Layered HVAC control daemon for Home Assistant (decision + actuation layers of hvac2)"
+license = "Apache-2.0"
+
+[[bin]]
+name = "hvacd"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1"
+futures-util = "0.3"
+rumqttc = "0.24"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "time", "signal"] }
+tokio-tungstenite = "0.24"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
