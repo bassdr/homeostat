@@ -257,20 +257,28 @@ mod tests {
 
     #[test]
     fn comfort_hold_honored_at_home_but_never_during_grid_events_or_away() {
+        // hold value chosen to differ from every matrix cell it meets, so
+        // each assertion can only pass for the right reason
         let mut i = inputs(Occupancy::Home, EnergyPeriod::Normal, Season::Heat);
-        i.comfort_setpoint = 24.0;
-        assert_eq!(decide(&i).main_setpoint, 24.0, "manual 24C held at home");
+        i.comfort_setpoint = 23.5;
+        assert_eq!(decide(&i).main_setpoint, 23.5, "manual hold applied at home");
 
         i.occupancy = Occupancy::HomeAsleep;
-        assert_eq!(decide(&i).main_setpoint, 24.0, "hold survives schedule transitions");
+        assert_eq!(decide(&i).main_setpoint, 23.5, "hold survives schedule transitions");
 
         i.energy_period = EnergyPeriod::Peak;
-        assert_eq!(decide(&i).main_setpoint, 16.0, "peak ignores the hold");
+        assert_eq!(decide(&i).main_setpoint, 16.0, "peak overrides the hold's effect");
 
         i.energy_period = EnergyPeriod::Preheat;
-        assert_eq!(decide(&i).main_setpoint, 24.0, "preheat ignores the hold");
+        assert_eq!(decide(&i).main_setpoint, 24.0, "preheat overrides the hold's effect");
 
         i.energy_period = EnergyPeriod::Normal;
+        assert_eq!(
+            decide(&i).main_setpoint,
+            23.5,
+            "the hold's value survives grid events and resumes after them"
+        );
+
         i.occupancy = Occupancy::Away;
         assert_eq!(decide(&i).main_setpoint, 19.0, "a stale hold is ignored when away");
     }
