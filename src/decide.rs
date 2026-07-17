@@ -9,6 +9,9 @@ use crate::state::{EnergyPeriod, HvacMode, Inputs, Occupancy};
 /// Bounds for the final main-zone setpoint after the comfort offset.
 const SETPOINT_MIN: f64 = 15.0;
 const SETPOINT_MAX: f64 = 29.0;
+/// Floor for the comfort hold in cool mode: a heating-grade hold reaching
+/// a cooling device is the July-7 output shape, whatever triggered it.
+const SETPOINT_MIN_COOL: f64 = 20.0;
 
 /// The aux zone is never commanded off, only down to this frost floor
 /// (the Sinope minimum): a setpoint persisted in the device keeps
@@ -106,10 +109,17 @@ pub fn decide(i: &Inputs) -> Desired {
     // Honor a manual hold (absolute setpoint, standard thermostat
     // semantics) on the main zone when someone is home and no grid event is
     // running (peak/preheat always win). The reset-on-away automation in HA
-    // is belt and suspenders on top of this.
+    // is belt and suspenders on top of this. The clamp is mode-aware: a
+    // stale heat-season hold (16) landing in cool mode must not command
+    // the AC to 16C - that is the July-7 shape, user-triggered.
     let main_setpoint =
         if i.occupancy.is_home() && i.energy_period == Normal && i.comfort_setpoint > 0.0 {
-            i.comfort_setpoint.clamp(SETPOINT_MIN, SETPOINT_MAX)
+            let min = if main_mode == Cool {
+                SETPOINT_MIN_COOL
+            } else {
+                SETPOINT_MIN
+            };
+            i.comfort_setpoint.clamp(min, SETPOINT_MAX)
         } else {
             main_setpoint
         };
@@ -204,6 +214,45 @@ mod tests {
                                 assert!(
                                     d.aux_zone_setpoint >= AUX_FROST_FLOOR,
                                     "aux-zone freeze floor violated: {i:?} -> {d:?}"
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// The generalized July-7 invariant: no reachable decision may pair
+    /// cool mode with a heating-grade setpoint, whatever produced it -
+    /// matrix cell, stale state, or a leftover heat-season comfort hold
+    /// punched in from the dashboard. Sweeps every input combination
+    /// including hostile hold values.
+    #[test]
+    fn cool_mode_never_carries_a_heating_grade_setpoint() {
+        use EnergyPeriod::*;
+        use HvacMode::*;
+        use Occupancy::*;
+
+        for main_mode in [Heat, Off, Cool] {
+            for energy_period in [Normal, Preheat, Peak] {
+                for occupancy in [Home, HomeAsleep, AwayReturning, Away, AwayFar] {
+                    for back_during_recovery in [true, false] {
+                        for comfort_setpoint in [0.0, 5.0, 16.0, 22.0, 29.0] {
+                            let i = Inputs {
+                                occupancy,
+                                energy_period,
+                                main_mode,
+                                aux_zone_occupied: false,
+                                comfort_setpoint,
+                                back_during_recovery,
+                            };
+                            let d = decide(&i);
+                            if d.main_mode == Cool {
+                                assert!(
+                                    d.main_setpoint >= SETPOINT_MIN_COOL,
+                                    "heating-grade setpoint under cool mode \
+                                     (the July-7 shape): {i:?} -> {d:?}"
                                 );
                             }
                         }
