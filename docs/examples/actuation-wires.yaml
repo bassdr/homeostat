@@ -1,0 +1,158 @@
+# =============================================================================
+# Actuation wires - EXAMPLE with dummy devices
+# =============================================================================
+# Dumb single-writer forwarders: no decision logic, no conditions except the
+# homeostat_enabled gate, exactly one automation writes each device. Replace
+# every `your_*` entity with your hardware.
+#
+# THE rule: the main zone's mode is written before its setpoint, always
+# together, from this one automation. A setpoint landing on a stale mode is
+# how houses get cooled to 19C all afternoon.
+# =============================================================================
+
+automation:
+  - id: homeostat_wire_main_zone
+    alias: "Homeostat wire: main zone"
+    triggers:
+      # the combined state string encodes mode/setpoint/fan, so any change
+      # re-sends the whole triple atomically
+      - trigger: state
+        entity_id: sensor.homeostat_desired
+      - trigger: state
+        entity_id: input_boolean.homeostat_enabled
+        to: "on"
+      - trigger: state
+        entity_id: climate.your_main_hvac
+        from: unavailable
+      - trigger: homeassistant
+        event: start
+    conditions:
+      - condition: state
+        entity_id: input_boolean.homeostat_enabled
+        state: "on"
+      - condition: template
+        value_template: "{{ has_value('sensor.homeostat_desired') }}"
+      - condition: template
+        value_template: "{{ has_value('climate.your_main_hvac') }}"
+    actions:
+      - variables:
+          mode: "{{ state_attr('sensor.homeostat_desired', 'main_mode') }}"
+          setpoint: "{{ state_attr('sensor.homeostat_desired', 'main_setpoint') }}"
+          fan: "{{ state_attr('sensor.homeostat_desired', 'fan_mode') }}"
+      # mode before setpoint, always together - do not split or reorder
+      - action: climate.set_hvac_mode
+        target:
+          entity_id: climate.your_main_hvac
+        data:
+          hvac_mode: "{{ mode }}"
+      - if:
+          - condition: template
+            value_template: "{{ mode != 'off' }}"
+        then:
+          - action: climate.set_temperature
+            target:
+              entity_id: climate.your_main_hvac
+            data:
+              temperature: "{{ setpoint }}"
+      - action: climate.set_fan_mode
+        target:
+          entity_id: climate.your_main_hvac
+        data:
+          fan_mode: "{{ fan }}"
+    mode: queued
+    max: 5
+
+  - id: homeostat_wire_aux_zone
+    alias: "Homeostat wire: aux zone"
+    triggers:
+      - trigger: state
+        entity_id: sensor.homeostat_desired_aux_zone_setpoint
+      - trigger: state
+        entity_id: input_boolean.homeostat_enabled
+        to: "on"
+      - trigger: homeassistant
+        event: start
+    conditions:
+      - condition: state
+        entity_id: input_boolean.homeostat_enabled
+        state: "on"
+      - condition: template
+        value_template: "{{ has_value('sensor.homeostat_desired_aux_zone_setpoint') }}"
+    actions:
+      - variables:
+          target: "{{ states('sensor.homeostat_desired_aux_zone_setpoint') | float(0) }}"
+      # 0 = zone off
+      - if:
+          - condition: template
+            value_template: "{{ target == 0 }}"
+        then:
+          - action: climate.turn_off
+            target:
+              entity_id: &aux_thermostats
+                - climate.your_aux_thermostat_1
+                - climate.your_aux_thermostat_2
+        else:
+          - action: climate.turn_on
+            target:
+              entity_id: *aux_thermostats
+          - action: climate.set_temperature
+            target:
+              entity_id: *aux_thermostats
+            data:
+              temperature: "{{ target }}"
+    mode: queued
+    max: 5
+
+  - id: homeostat_wire_load_shed
+    alias: "Homeostat wire: shed deferrable loads"
+    # hang anything you want forced off during grid events on this one flag:
+    # water heater, pool pump, EV charging (or just a warning notification -
+    # never unplug someone's car without asking)
+    triggers:
+      - trigger: state
+        entity_id: binary_sensor.homeostat_desired_load_shed
+      - trigger: state
+        entity_id: input_boolean.homeostat_enabled
+        to: "on"
+      - trigger: homeassistant
+        event: start
+    conditions:
+      - condition: state
+        entity_id: input_boolean.homeostat_enabled
+        state: "on"
+      - condition: template
+        value_template: "{{ has_value('binary_sensor.homeostat_desired_load_shed') }}"
+    actions:
+      - if:
+          - condition: state
+            entity_id: binary_sensor.homeostat_desired_load_shed
+            state: "on"
+        then:
+          - action: switch.turn_off
+            target:
+              entity_id: switch.your_water_heater
+        else:
+          - action: switch.turn_on
+            target:
+              entity_id: switch.your_water_heater
+    mode: queued
+    max: 5
+
+  # Dead-man switch: the daemon's MQTT last-will flips its entities
+  # unavailable the moment it dies; alert if that lasts.
+  - id: homeostat_daemon_watchdog
+    alias: "Homeostat: daemon watchdog"
+    triggers:
+      - trigger: state
+        entity_id: sensor.homeostat_desired
+        to: unavailable
+        for:
+          minutes: 10
+    actions:
+      - action: notify.your_phone
+        data:
+          title: homeostat is down
+          message: >
+            The homeostat daemon has been unreachable for 10 minutes.
+            Thermostats keep their last setpoints.
+    mode: single

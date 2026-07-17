@@ -1,0 +1,204 @@
+# =============================================================================
+# Perception package - EXAMPLE with dummy source entities
+# =============================================================================
+# Drop into your HA config (e.g. as a package) and replace every `your_*`
+# entity with something real from your setup. The homeostat_* names on the
+# left are the daemon's input contract - keep those.
+#
+# The philosophy: perception publishes FACTS (who is home, what the grid is
+# doing, how cold it is); all POLICY (setpoints, thresholds, trade-offs)
+# lives in the daemon's decision matrix. Keeping these in YAML gives you a
+# fast edit -> "reload template entities" tuning loop.
+# =============================================================================
+
+input_boolean:
+  homeostat_enabled:
+    # master gate for the actuation wires: off = shadow mode (the daemon
+    # decides and publishes, nothing moves), on = homeostat drives the house
+    name: Homeostat active
+    icon: mdi:thermostat-auto
+
+input_number:
+  homeostat_comfort_setpoint:
+    name: Homeostat comfort hold
+    # manual hold: absolute setpoint applied when someone is home outside
+    # grid events; 0 = automatic (follow the matrix)
+    min: 0
+    max: 29
+    step: 0.5
+    unit_of_measurement: °C
+
+  homeostat_recovery_rate:
+    name: Recovery rate at 0C outside
+    # how fast your heating actually warms the whole house, measured, in
+    # C/h. Pull it from your temperature history: sustained multi-hour
+    # recovery episodes, not short bursts. Overestimating = arriving to a
+    # cold house.
+    min: 0.5
+    max: 4.5
+    step: 0.1
+    initial: 1.5
+    unit_of_measurement: °C/h
+
+  homeostat_recovery_hours:
+    name: Recovery horizon
+    # worst-case hours for the house to reheat itself to livable after a
+    # fully-shed peak; gates the away preheat boost below
+    min: 0
+    max: 12
+    step: 0.5
+    initial: 6
+    unit_of_measurement: h
+
+input_datetime:
+  homeostat_expected_return:
+    name: Expected return
+    # manual "back around 17:30" estimate; ignored once in the past
+    has_date: true
+    has_time: true
+
+template:
+  - binary_sensor:
+      # Your demand-response signals. These two isolate the provider: swap
+      # utilities and only these change.
+      - name: homeostat_grid_peak_now
+        unique_id: homeostat_grid_peak_now
+        state: "{{ is_state('binary_sensor.your_utility_peak_active', 'on') }}"
+
+      - name: homeostat_grid_preheat_now
+        unique_id: homeostat_grid_preheat_now
+        state: "{{ is_state('binary_sensor.your_utility_preheat_active', 'on') }}"
+
+      - name: homeostat_daemon_alive
+        unique_id: homeostat_daemon_alive
+        device_class: connectivity
+        # the daemon's MQTT last-will flips its entities unavailable when it
+        # dies, so presence of a value = alive
+        state: "{{ has_value('sensor.homeostat_desired') }}"
+
+      - name: homeostat_aux_zone_occupied
+        unique_id: homeostat_aux_zone_occupied
+        delay_off: "00:30:00"
+        state: >
+          {{ is_state('binary_sensor.your_aux_zone_motion', 'on')
+             or states('media_player.your_aux_zone_tv') in ['on', 'idle', 'playing'] }}
+
+      - name: homeostat_heading_home
+        unique_id: homeostat_heading_home
+        # confirmed en route, not merely nearby: navigation targeting home
+        # AND the vehicle is actually with you (someone else driving your
+        # car home must not fake a return). Missing data fails the guard.
+        state: >
+          {{ is_state('device_tracker.your_car_route', 'home')
+             and distance('device_tracker.your_car', 'person.you')
+                 | float(999) < 1 }}
+
+      - name: homeostat_back_during_recovery
+        unique_id: homeostat_back_during_recovery
+        # the preheat boost only pays if someone is home during the peak or
+        # before the house has recovered on its own afterwards. Unknown =
+        # on, the comfort-safe default; skipping the boost requires positive
+        # evidence of absence.
+        state: >
+          {% set peak_end = states('sensor.homeostat_grid_peak_end') | as_datetime(none) %}
+          {% if peak_end is none %}
+            true
+          {% else %}
+            {% set horizon = peak_end + timedelta(hours=states('input_number.homeostat_recovery_hours') | float(5)) %}
+            {% set eta = states('sensor.homeostat_return_eta') | float(0) %}
+            {% set floor = states('sensor.homeostat_return_floor') | float(0) %}
+            {% set absent_estimated = eta > 0 and now() + timedelta(minutes=eta) >= horizon %}
+            {% set absent_proven = now() + timedelta(minutes=floor) >= horizon %}
+            {{ not (absent_estimated or absent_proven) }}
+          {% endif %}
+
+  - sensor:
+      - name: homeostat_grid_peak_end
+        unique_id: homeostat_grid_peak_end
+        device_class: timestamp
+        availability: "{{ has_value('sensor.your_utility_next_peak_end') }}"
+        state: "{{ states('sensor.your_utility_next_peak_end') }}"
+
+      - name: homeostat_occupancy
+        unique_id: homeostat_occupancy
+        # presence facts only - away_returning / away_far are derived inside
+        # the daemon from the return sensors below
+        state: >
+          {% if is_state('alarm_control_panel.your_alarm', 'armed_away') %}
+            away
+          {% elif is_state('sun.sun', 'below_horizon')
+                and is_state('binary_sensor.your_main_floor_motion', 'off') %}
+            home_asleep
+          {% else %}
+            home
+          {% endif %}
+
+      - name: homeostat_return_floor
+        unique_id: homeostat_return_floor
+        unit_of_measurement: min
+        state_class: measurement
+        # earliest POSSIBLE arrival - a lower bound, always true. Best
+        # source: a live travel-time-home sensor (Waze/Google integration,
+        # origin = your person entity). Fallback: distance at highway speed.
+        # Round DOWN (a lower bound must stay true); unknown GPS gives 0,
+        # the vacuously true floor.
+        state: >
+          {% set travel = states('sensor.your_travel_time_home') | float(0) %}
+          {% if travel > 0 %}
+            {{ (travel / 5) | round(0, 'floor') * 5 }}
+          {% else %}
+            {{ (distance('zone.home', 'person.you') | float(0)
+                * 60 / 100 / 5) | round(0, 'floor') * 5 }}
+          {% endif %}
+
+      - name: homeostat_return_eta
+        unique_id: homeostat_return_eta
+        unit_of_measurement: min
+        state_class: measurement
+        # a CREDIBLE estimate; 0 = none. Confirmed heading home means
+        # "worst case, home in floor minutes". Rounding to 5 min is the
+        # hysteresis that keeps nav jitter from flapping decisions, and
+        # since now()-templates re-render every minute, time-based bucket
+        # changes reach the daemon as ordinary state changes.
+        state: >
+          {% if is_state('binary_sensor.homeostat_heading_home', 'on') %}
+            {{ [states('sensor.homeostat_return_floor') | float(0), 5] | max }}
+          {% else %}
+            {% set manual_ts = state_attr('input_datetime.homeostat_expected_return', 'timestamp') | float(0) %}
+            {% set mins = (manual_ts - now().timestamp()) / 60 %}
+            {{ ((mins / 5) | round(0, 'ceil') * 5) if mins > 0 else 0 }}
+          {% endif %}
+
+      - name: homeostat_recovery_minutes
+        unique_id: homeostat_recovery_minutes
+        unit_of_measurement: min
+        state_class: measurement
+        # time to reheat the house to livable (19C here) from its current
+        # temperature, at your measured rate corrected for outdoor
+        # temperature. This stretches the daemon's returning lead so an
+        # arrival never lands in a cold post-peak house.
+        state: >
+          {% set t = state_attr('climate.your_main_hvac', 'current_temperature') | float(19) %}
+          {% set t_out = states('sensor.your_outdoor_temperature') | float(0) %}
+          {% set rate = [states('input_number.homeostat_recovery_rate') | float(1.5)
+                         + 0.015 * t_out, 0.8] | max %}
+          {{ ([(19 - t) * 60 / rate, 0] | max / 5) | round(0, 'ceil') * 5 }}
+
+      - name: homeostat_energy_period
+        unique_id: homeostat_energy_period
+        state: >
+          {% if is_state('binary_sensor.homeostat_grid_peak_now', 'on') %}
+            peak
+          {% elif is_state('binary_sensor.homeostat_grid_preheat_now', 'on') %}
+            preheat
+          {% else %}
+            normal
+          {% endif %}
+
+      - name: homeostat_season
+        unique_id: homeostat_season
+        # from tomorrow-ish outdoor forecast: fan strictly between the
+        # thresholds, cool above, heat below
+        state: >
+          {% set t = states('sensor.your_forecast_high') | float(20) %}
+          {% if t >= 25 %}cool{% elif t <= 16 %}heat{% else %}fan{% endif %}

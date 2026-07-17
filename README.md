@@ -1,103 +1,105 @@
-# homeostat — whole-house energy policy daemon for Home Assistant
+# homeostat
 
-Holds the house in equilibrium (after [Ashby's homeostat](https://en.wikipedia.org/wiki/Homeostat),
-1948). The daemon subscribes to a small set of *perception entities* you
-define in Home Assistant, runs a decision matrix as a pure, unit-tested
-function, and publishes its decision back as `sensor.homeostat_desired` via
-MQTT discovery. Actuation is HA's job: thin "wire" automations (no decision
-logic, gated by an `input_boolean`) forward the desired values to your
-devices. The daemon contains no entity IDs of physical hardware at all.
+Whole-house energy policy daemon for Home Assistant (after [Ashby's
+homeostat](https://en.wikipedia.org/wiki/Homeostat), 1948). It reads a small
+set of *perception* entities you define in HA, runs a pure, unit-tested
+decision matrix, and publishes what the house *should* be doing back to HA
+via MQTT discovery. It never touches your devices: thin "wire" automations
+on the HA side forward its decisions to your actual hardware, and the daemon
+contains zero physical entity IDs.
 
-## The perception contract
+> **Status: early.** This currently runs (in shadow mode) in exactly one
+> house, the author's — and it does not fully work there yet either. Expect
+> the contract below to change without notice. If you try it anyway, you are
+> the second user ever; issues welcome.
 
-homeostat is utility- and hardware-agnostic. You provide five entities in HA
-(template sensors, integrations, whatever you like — see
-`configuration.d/homeostat.yaml` in the author's config for a worked example
-using an alarm panel, motion sensors, a Tesla's ETA, and Hydro-Québec's
-open-data peak feed):
+## Running it
 
-| Entity                                    | Values                                            |
-|-------------------------------------------|---------------------------------------------------|
-| `sensor.homeostat_occupancy`               | `home` `home_asleep` `away_returning` `away` `away_far` |
-| `sensor.homeostat_energy_period`           | `normal` `preheat` `peak`                          |
-| `sensor.homeostat_season`                  | `heat` `fan` `cool`                                |
-| `binary_sensor.homeostat_aux_zone_occupied`| `on` / `off`                                       |
-| `input_number.homeostat_comfort_setpoint` | absolute hold in °C, `0` = automatic               |
+A multi-arch docker image (amd64 / arm64 / armv7) is published on releases:
 
-`energy_period` abstracts any demand-response program (Hydro-Québec winter
-credit, Tempo, Octopus events, a plain time-of-use schedule). If any input
-is `unknown`/`unavailable`, homeostat holds its last decision rather than
-acting on garbage.
+```bash
+docker pull ghcr.io/bassdr/homeostat
+```
 
-Outputs are consumed the same way: your wire automations read
-`sensor.homeostat_desired`'s attributes (`main_mode`, `main_setpoint`,
-`fan_mode`, `aux_zone_setpoint`, `water_heater`) and forward them to your
-devices. See the author's config for worked examples, including the one rule
-that matters: the main zone's mode and setpoint must be forwarded together,
-in that order, by a single automation.
+How you run it is up to you (compose, systemd, k8s on a toaster). It needs
+exactly two things reachable from the container, both configured by
+environment variable:
+
+| Variable              | Default                             | Notes                    |
+|-----------------------|-------------------------------------|--------------------------|
+| `HOMEOSTAT_HA_URL`    | `ws://127.0.0.1:8123/api/websocket` | HA WebSocket API         |
+| `HOMEOSTAT_HA_TOKEN`  | (required)                          | long-lived access token  |
+| `HOMEOSTAT_MQTT_HOST` | `127.0.0.1`                         | broker HA also listens to|
+| `HOMEOSTAT_MQTT_PORT` | `1883`                              |                          |
+| `HOMEOSTAT_MQTT_USER` | (none)                              | with `HOMEOSTAT_MQTT_PASS` |
+
+See [docs/deployment.md](docs/deployment.md) for sample compose/systemd
+units.
+
+## What you feed it (perception)
+
+You provide these entities in HA. How you compute them is entirely your
+business — template sensors, integrations, a cron job that guesses — as long
+as the entity IDs and value vocabularies match. A worked template package
+with dummy source names is in
+[docs/examples/perception.yaml](docs/examples/perception.yaml).
+
+| Entity | Values | Meaning |
+|---|---|---|
+| `sensor.homeostat_occupancy` | `home` `home_asleep` `away` | presence facts only |
+| `sensor.homeostat_energy_period` | `normal` `preheat` `peak` | your demand-response program (Hydro-Québec winter credit, Tempo, Octopus events, plain TOU) |
+| `sensor.homeostat_season` | `heat` `fan` `cool` | which physical mode the climate calls for |
+| `binary_sensor.homeostat_aux_zone_occupied` | `on`/`off` | secondary zone (e.g. basement) in use |
+| `input_number.homeostat_comfort_setpoint` | °C, `0` = automatic | manual hold; survives grid events, ignored when away |
+| `sensor.homeostat_return_eta` | minutes, `0` = no estimate | credible time-until-someone-is-home (nav, calendar, manual) |
+| `sensor.homeostat_return_floor` | minutes, `0` = vacuous | earliest *possible* arrival (travel time / distance) — a lower bound, always true |
+| `sensor.homeostat_recovery_minutes` | minutes, `0` = warm enough | time to reheat the house to livable from its current temperature |
+| `binary_sensor.homeostat_back_during_recovery` | `on`/`off` | someone expected home during the peak or soon after; gates the away preheat boost |
+
+Conventions: `0` means "none/unknown" on the numeric optionals; a required
+input going `unknown`/`unavailable` *suspends* decisions (the daemon holds
+its last output rather than acting on garbage). The four return/recovery
+inputs are optional — without them you simply get plain `away` behavior.
+
+## What it produces (via MQTT discovery)
+
+Everything appears in HA automatically under one "Homeostat" device:
+
+| Entity | What it is |
+|---|---|
+| `sensor.homeostat_desired` | **the actuation contract**: `mode/setpoint/fan` as one string, with attributes `main_mode`, `main_setpoint`, `fan_mode`, `aux_zone_setpoint`, `shed_loads`, `inputs`. Its *single* state change is what your main-zone wire triggers on, so mode and setpoint always travel together |
+| `sensor.homeostat_desired_main_setpoint` | per-value view, °C — for history graphs |
+| `sensor.homeostat_desired_main_mode` | per-value view (`heat`/`cool`/`off`) |
+| `sensor.homeostat_desired_fan_mode` | per-value view (`on`/`auto`) |
+| `sensor.homeostat_desired_aux_zone_setpoint` | secondary-zone target, °C; `0` = zone off |
+| `binary_sensor.homeostat_desired_load_shed` | `on` = shed deferrable loads *now* (water heater, EV charging, whatever you wire to it) |
+| availability | MQTT last-will: everything flips `unavailable` the moment the daemon dies |
+| `homeostat/heartbeat` (topic) | retained unix timestamp, for a dead-man alert |
+
+To make something happen, write dumb single-writer wire automations: no
+conditions except a master `input_boolean` gate, no decision logic, one
+automation per device. Worked examples (main zone, aux zone, load shed,
+watchdog) with dummy device names:
+[docs/examples/actuation-wires.yaml](docs/examples/actuation-wires.yaml).
+The one rule that matters: **forward the main zone's mode before its
+setpoint, always both, from one automation** — see the regression-tested
+incident in `src/decide.rs`.
 
 ## Design invariants
 
-- **The matrix is a pure function** (`src/decide.rs`) — every temperature in
-  the system is in one file, exhaustively matched: an unhandled
-  (season × period × occupancy) combination is a compile error.
-- **Mode before setpoint, always together** — the decision publishes them
-  as one state change so the main-zone wire automation forwards the whole
-  triple atomically, preventing the 2026-07-07 incident (a heat setpoint
-  applied to a device left in cool mode). There is a regression test for
-  that day's decision.
-- **Fail loud, fail safe** — unknown entity states suspend decisions instead
-  of feeding garbage into the matrix; MQTT last-will marks the sensor
-  unavailable if the daemon dies; a retained heartbeat timestamp allows a
-  dead-man alert automation in HA.
+- **The matrix is a pure function** (`src/decide.rs`): every temperature in
+  the system lives in one file, exhaustively matched — an unhandled
+  combination is a compile error, and a property test forbids any decision
+  from ever commanding near-freezing setpoints.
+- **Fail loud, fail safe**: garbage inputs suspend decisions; death is
+  visible (last-will + heartbeat); shadow mode (gate off) lets you compare
+  decisions against your existing setup for as long as you like before
+  anything moves.
 
-## Build & test
+## Build & develop
 
 ```bash
 cargo test
-cargo build --release   # -> target/release/homeostat
-```
-
-## Configuration (environment)
-
-| Variable          | Default                              | Notes                          |
-|-------------------|--------------------------------------|--------------------------------|
-| `HOMEOSTAT_HA_URL`    | `ws://127.0.0.1:8123/api/websocket`  |                                |
-| `HOMEOSTAT_HA_TOKEN`  | (required)                           | long-lived access token        |
-| `HOMEOSTAT_MQTT_HOST` | `127.0.0.1`                          |                                |
-| `HOMEOSTAT_MQTT_PORT` | `1883`                               |                                |
-| `HOMEOSTAT_MQTT_USER` | (none)                               | with `HOMEOSTAT_MQTT_PASS`         |
-
-## Deployment (systemd)
-
-```ini
-# /etc/systemd/system/homeostat.service
-[Unit]
-Description=HVAC decision daemon
-After=network-online.target
-
-[Service]
-ExecStart=/usr/local/bin/homeostat
-EnvironmentFile=/etc/homeostat.env
-Restart=always
-RestartSec=5
-DynamicUser=yes
-
-[Install]
-WantedBy=multi-user.target
-```
-
-## Migration plan
-
-1. Deploy `configuration.d/homeostat.yaml` to the live HA (perception sensors).
-2. Run homeostat in shadow mode; compare `sensor.homeostat_desired` against
-   `sensor.homeostat_desired` (the YAML matrix) in HA history for a few days.
-3. Add a dead-man automation on `homeostat/heartbeat` staleness.
-4. Turn on the actuation gate (`input_boolean.homeostat_enabled`) and
-   disable the legacy automations. Rollback is flipping the boolean back.
-
-## Development
-
-```bash
-git config core.hooksPath .githooks   # once per clone: fmt + clippy before each commit
+cargo build --release                  # -> target/release/homeostat
+git config core.hooksPath .githooks    # once per clone: fmt + clippy pre-commit
 ```
