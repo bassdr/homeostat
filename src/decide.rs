@@ -81,8 +81,28 @@ pub fn decide(i: &Inputs) -> Desired {
             (Preheat, Home) => 25.0,
             (Preheat, HomeAsleep) => 24.0,
             (Preheat, AwayReturning) => 25.0,
-            (Preheat, Away) => 23.0,
-            (Preheat, AwayFar) => 21.0,
+            // The preheat boost only pays if someone is home during the
+            // peak or before the house recovers on its own afterwards.
+            // Provably absent past that horizon = bare preheat: hold the
+            // normal away baseline and let the peak fall deep (~10C,
+            // verified livable-when-empty). Whether an absent house should
+            // instead keep a small boost (19->24->12 vs 19->19->10 cycles)
+            // is empirically unresolved - compare peak-day kWh once this
+            // runs and tune these two cells.
+            (Preheat, Away) => {
+                if i.back_during_recovery {
+                    23.0
+                } else {
+                    19.0
+                }
+            }
+            (Preheat, AwayFar) => {
+                if i.back_during_recovery {
+                    21.0
+                } else {
+                    17.0
+                }
+            }
             (Peak, Home) => 16.0,
             (Peak, HomeAsleep) => 16.0,
             (Peak, AwayReturning) => 13.0,
@@ -136,6 +156,55 @@ mod tests {
             season,
             aux_zone_occupied: false,
             comfort_setpoint: 0.0,
+            back_during_recovery: true,
+        }
+    }
+
+    /// Hard safety invariant: indoor anywhere near 0C risks breaking the
+    /// house (pipes - at -20 outside a drop can run -5C/h once shed). The
+    /// protection is that every reachable decision, however aggressive the
+    /// shed, commands a setpoint the thermostats will defend: >= 10C on the
+    /// main zone in any heating-capable season, >= 5C (the Sinope frost
+    /// floor) on the aux zone. Burning peak kWh to hold that line is
+    /// always the right trade - breakage costs more than credit.
+    #[test]
+    fn no_decision_ever_commands_anywhere_near_freezing() {
+        use EnergyPeriod::*;
+        use Occupancy::*;
+        use Season::*;
+
+        for season in [Heat, Fan, Cool] {
+            for energy_period in [Normal, Preheat, Peak] {
+                for occupancy in [Home, HomeAsleep, AwayReturning, Away, AwayFar] {
+                    for back_during_recovery in [true, false] {
+                        for aux_zone_occupied in [true, false] {
+                            for comfort_setpoint in [0.0, 5.0, 29.0] {
+                                let i = Inputs {
+                                    occupancy,
+                                    energy_period,
+                                    season,
+                                    aux_zone_occupied,
+                                    comfort_setpoint,
+                                    back_during_recovery,
+                                };
+                                let d = decide(&i);
+                                if season != Cool {
+                                    assert!(
+                                        d.main_setpoint >= 10.0,
+                                        "main-zone freeze floor violated: {i:?} -> {d:?}"
+                                    );
+                                }
+                                if let Some(aux) = d.aux_zone_setpoint {
+                                    assert!(
+                                        aux >= 5.0,
+                                        "aux-zone freeze floor violated: {i:?} -> {d:?}"
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
+            }
         }
     }
 
@@ -253,6 +322,30 @@ mod tests {
             15.0,
             "a lowball hold clamps to SETPOINT_MIN"
         );
+    }
+
+    #[test]
+    fn bare_preheat_when_provably_absent_past_the_recovery_horizon() {
+        let mut i = inputs(Occupancy::Away, EnergyPeriod::Preheat, Season::Heat);
+        assert_eq!(decide(&i).main_setpoint, 23.0, "assume back = boost");
+        i.back_during_recovery = false;
+        assert_eq!(
+            decide(&i).main_setpoint,
+            19.0,
+            "absent = hold the normal away baseline, no boost"
+        );
+
+        i.occupancy = Occupancy::AwayFar;
+        assert_eq!(decide(&i).main_setpoint, 17.0);
+
+        // only the away preheat cells listen to it
+        i.occupancy = Occupancy::Home;
+        assert_eq!(decide(&i).main_setpoint, 25.0);
+        i.occupancy = Occupancy::AwayReturning;
+        assert_eq!(decide(&i).main_setpoint, 25.0);
+        i.occupancy = Occupancy::Away;
+        i.energy_period = EnergyPeriod::Peak;
+        assert_eq!(decide(&i).main_setpoint, 12.0, "peak cells unchanged");
     }
 
     #[test]
