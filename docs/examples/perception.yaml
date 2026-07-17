@@ -195,10 +195,12 @@ template:
             normal
           {% endif %}
 
-      - name: homeostat_season
-        unique_id: homeostat_season
-        # from tomorrow-ish outdoor forecast: fan strictly between the
-        # thresholds, cool above, heat below
+      - name: homeostat_main_mode
+        unique_id: homeostat_main_mode
+        # what the day demands of the main zone, from the outdoor forecast:
+        # off (no conditioning) strictly between the thresholds, cool above,
+        # heat below. Circulation on off days is the daemon's output-side
+        # decision (desired_fan_mode), not an input value.
         state: >
           {% set t = states('sensor.your_forecast_high') | float(20) %}
-          {% if t >= 25 %}cool{% elif t <= 16 %}heat{% else %}fan{% endif %}
+          {% if t >= 25 %}cool{% elif t <= 16 %}heat{% else %}off{% endif %}
