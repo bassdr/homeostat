@@ -10,6 +10,12 @@ use crate::state::{EnergyPeriod, HvacMode, Inputs, Occupancy};
 const SETPOINT_MIN: f64 = 15.0;
 const SETPOINT_MAX: f64 = 29.0;
 
+/// The aux zone is never commanded off, only down to this frost floor
+/// (the Sinope minimum): a setpoint persisted in the device keeps
+/// defending the house even if daemon, HA and network all die. Only
+/// deferrable loads (load_shed) are ever fully off.
+const AUX_FROST_FLOOR: f64 = 5.0;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FanMode {
     On,
@@ -30,8 +36,9 @@ pub struct Desired {
     pub main_mode: HvacMode,
     pub main_setpoint: f64,
     pub fan_mode: FanMode,
-    /// None = basement thermostats off (cooling days).
-    pub aux_zone_setpoint: Option<f64>,
+    /// Always a real setpoint - AUX_FROST_FLOOR when the zone has no
+    /// comfort duty (never off; see the constant).
+    pub aux_zone_setpoint: f64,
     /// Shed deferrable loads now. Policy, not a device: the wires decide
     /// what hangs off it (water heater off, EV-charging warning, anything
     /// you want forced off during a grid event).
@@ -115,16 +122,24 @@ pub fn decide(i: &Inputs) -> Desired {
         FanMode::Auto
     };
 
-    // The aux zone is heat-only equipment: it exists in the decision only
-    // when the day demands heating. Off days keep it off - a shoulder-
-    // season basement may sit below these setpoints without that being a
-    // reason to burn watts (and a grid preheat on an off day must not
-    // boost a zone that had no business heating at all).
+    // The aux zone is heat-only equipment: it heats for comfort only when
+    // the day demands heating. Everything else - off days, cool days, deep
+    // peaks - gets the frost floor rather than a turn-off: a setpoint
+    // persisted in the device defends the house even when daemon, HA and
+    // network are all dead, which is exactly when it matters. A shoulder-
+    // season basement at 14C stays unheated (the floor never engages above
+    // 5C), and a grid preheat on an off day boosts nothing.
     let aux_zone_setpoint = match (i.main_mode, i.energy_period) {
-        (Cool | Off, _) => None,
-        (Heat, Peak) => Some(5.0),
-        (Heat, Preheat) => Some(26.0),
-        (Heat, Normal) => Some(if i.aux_zone_occupied { 19.0 } else { 16.0 }),
+        (Cool | Off, _) => AUX_FROST_FLOOR,
+        (Heat, Peak) => AUX_FROST_FLOOR,
+        (Heat, Preheat) => 26.0,
+        (Heat, Normal) => {
+            if i.aux_zone_occupied {
+                19.0
+            } else {
+                16.0
+            }
+        }
     };
 
     Desired {
@@ -186,12 +201,10 @@ mod tests {
                                         "main-zone freeze floor violated: {i:?} -> {d:?}"
                                     );
                                 }
-                                if let Some(aux) = d.aux_zone_setpoint {
-                                    assert!(
-                                        aux >= 5.0,
-                                        "aux-zone freeze floor violated: {i:?} -> {d:?}"
-                                    );
-                                }
+                                assert!(
+                                    d.aux_zone_setpoint >= AUX_FROST_FLOOR,
+                                    "aux-zone freeze floor violated: {i:?} -> {d:?}"
+                                );
                             }
                         }
                     }
@@ -226,7 +239,7 @@ mod tests {
         let d = decide(&i);
         assert!(d.shed_loads);
         assert_eq!(d.main_setpoint, 16.0);
-        assert_eq!(d.aux_zone_setpoint, Some(5.0));
+        assert_eq!(d.aux_zone_setpoint, AUX_FROST_FLOOR);
 
         // shedding is a peak thing only - preheat and normal keep loads on
         for period in [EnergyPeriod::Normal, EnergyPeriod::Preheat] {
@@ -357,20 +370,22 @@ mod tests {
     #[test]
     fn aux_zone_follows_occupancy_and_cool_days_turn_it_off() {
         let mut i = inputs(Occupancy::Home, EnergyPeriod::Normal, HvacMode::Heat);
-        assert_eq!(decide(&i).aux_zone_setpoint, Some(16.0));
+        assert_eq!(decide(&i).aux_zone_setpoint, 16.0);
         i.aux_zone_occupied = true;
-        assert_eq!(decide(&i).aux_zone_setpoint, Some(19.0));
+        assert_eq!(decide(&i).aux_zone_setpoint, 19.0);
         i.main_mode = HvacMode::Cool;
-        assert_eq!(decide(&i).aux_zone_setpoint, None);
+        assert_eq!(decide(&i).aux_zone_setpoint, AUX_FROST_FLOOR);
     }
 
-    /// The aux zone (basement baseboards) is heat-only equipment: no
-    /// reachable decision may command it unless the day demands heating.
-    /// Caught in shadow on an off day: the old (_, Normal) arm armed the
-    /// basement at 16C in July, and (Off, Preheat) would have boosted a
-    /// zone to 26C that had no business heating at all.
+    /// Without heat demand the aux zone (basement baseboards) holds
+    /// exactly the frost floor: no comfort heating (caught in shadow on an
+    /// off day - the old (_, Normal) arm armed the basement at 16C in
+    /// July, and (Off, Preheat) would have boosted it to 26C), but never
+    /// off either - the persisted 5C setpoint is the passive backstop
+    /// that still defends the house if the main source, the daemon or HA
+    /// itself is dysfunctional, peak or no peak.
     #[test]
-    fn aux_zone_never_heats_unless_main_mode_is_heat() {
+    fn aux_zone_holds_only_the_frost_floor_without_heat_demand() {
         use EnergyPeriod::*;
         use HvacMode::*;
         use Occupancy::*;
@@ -390,8 +405,9 @@ mod tests {
                             };
                             let d = decide(&i);
                             assert_eq!(
-                                d.aux_zone_setpoint, None,
-                                "aux zone armed without heat demand: {i:?} -> {d:?}"
+                                d.aux_zone_setpoint, AUX_FROST_FLOOR,
+                                "aux zone must hold exactly the frost floor \
+                                 without heat demand: {i:?} -> {d:?}"
                             );
                         }
                     }

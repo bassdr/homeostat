@@ -138,7 +138,9 @@ impl Mqtt {
                     json!({ "icon": "mdi:fan" }),
                 ),
             ),
-            // 0 = zone off (same convention as the comfort hold: 0 = none)
+            // always a real setpoint: the frost floor when the zone has no
+            // comfort duty, never 0/off (heating zones are never off; only
+            // deferrable loads are - see load_shed)
             (
                 "sensor",
                 entity(
@@ -204,10 +206,7 @@ impl Mqtt {
             (TOPIC_MAIN_SETPOINT, desired.main_setpoint.to_string()),
             (TOPIC_MAIN_MODE, desired.main_mode.as_str().to_owned()),
             (TOPIC_FAN_MODE, desired.fan_mode.as_str().to_owned()),
-            (
-                TOPIC_AUX_SETPOINT,
-                desired.aux_zone_setpoint.unwrap_or(0.0).to_string(),
-            ),
+            (TOPIC_AUX_SETPOINT, desired.aux_zone_setpoint.to_string()),
             (TOPIC_LOAD_SHED, shed.to_owned()),
             (TOPIC_ATTRS, attrs.to_string()),
             (TOPIC_STATE, state),
