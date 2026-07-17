@@ -1,0 +1,232 @@
+# =============================================================================
+# DRAFT: expected-return model for away detection
+# =============================================================================
+# Occupancy stops quantizing away-ness into away/away_returning/away_far;
+# perception publishes presence facts plus two time-until-return sensors, and
+# the daemon derives the old three buckets at its input boundary
+# (state.rs::Occupancy::derive). decide() and its matrix are untouched.
+#
+#   sensor.homeostat_occupancy    home / home_asleep / away   (3 states)
+#   binary_sensor.homeostat_heading_home  confirmed en route (car navigating
+#                                 home AND the car is with David)
+#   sensor.homeostat_return_floor earliest possible arrival, minutes: phone
+#                                 travel time home (traffic-aware: ~20 min at
+#                                 night, 45-60 at rush hour), distance at
+#                                 100 km/h as fallback; 0 = vacuous floor
+#   sensor.homeostat_return_eta   credible estimate, minutes; 0 = no estimate.
+#                                 Confirmed heading home means "worst case,
+#                                 home in floor minutes" so the floor is the
+#                                 estimate; otherwise manual/calendar; else 0.
+#   sensor.homeostat_recovery_minutes  minutes to bring the main zone back to
+#                                 livable (19C) from its current temperature.
+#                                 Stretches the daemon's returning lead so an
+#                                 arrival never lands in a cold cycle.
+#   binary_sensor.homeostat_back_during_recovery  someone expected home
+#                                 during the peak or within recovery_hours
+#                                 after it ends; unknown = on (comfort-safe).
+#                                 Gates the winter preheat boost: provably
+#                                 absent = bare preheat, let the peak fall
+#                                 deep, bank the credit.
+#
+# The car's position deliberately does NOT tighten the floor: a lower bound
+# stays true whether or not the car is with David (nobody gets him home
+# faster than a car ride). It only guards heading_home - car nav means
+# "David returning" only when the car is with him, not when someone else
+# drives it home.
+#
+# Both time sensors are rounded to 5 min: templates referencing now() re-render
+# every minute, so bucket transitions reach the daemon as ordinary state
+# changes (it stays event-driven, no clock), and the rounding is the hysteresis
+# that keeps nav jitter from flapping decisions.
+#
+# NOT part of configuration.d - merging this into the live package means:
+#   1. replace the occupancy sensor with the version below
+#   2. add the two return sensors and the input_datetime
+#   3. delete binary_sensor.homeostat_returning_home (superseded by
+#      homeostat_heading_home) and add the Waze travel-time integration
+#      (origin person.david_racine, destination zone.home) as
+#      sensor.david_time_to_home for the traffic-aware floor
+#   4. delete input_number.homeostat_away_far_distance (policy moved to the
+#      daemon: FAR_MIN in state.rs; note far now starts at ~200 km on
+#      distance data alone, vs the old knob's 100 km default)
+#   5. deploy perception BEFORE the daemon build that carries Presence::parse
+#      (the new parser rejects the legacy five-state values and suspends)
+# =============================================================================
+
+input_number:
+  homeostat_recovery_rate:
+    name: Homeostat recovery rate at 0C outside
+    # measured, not guessed: 43 sustained recovery episodes (>=2 h of solid
+    # heating) in the hourly stats of sensor.hvac_t across winter 2025-26
+    # (the new HVAC's first winter) fit rate = 1.38 + 0.015 * T_out C/h -
+    # 1.4 at freezing, 1.2 at -10 (a usual Montreal winter day), ~1.1 at
+    # -20 (solid cold; edge of the measured range - matches the lived
+    # 'lower stages cannot compensate, stage 2 at least'). This knob is the 0C
+    # intercept; the slope lives in the recovery_minutes template. Short
+    # bursts run hotter (22->24 in ~40 min) but hourly means smear them,
+    # and the sustained rate is the conservative planning number anyway:
+    # overestimating the rate means arriving to a cold house. Live
+    # counterpart of this telemetry: input_number.hvac_dt.
+    min: 0.5
+    max: 4.5
+    step: 0.1
+    initial: 1.4
+    unit_of_measurement: °C/h
+    icon: mdi:thermometer-chevron-up
+
+  homeostat_recovery_hours:
+    name: Homeostat recovery horizon
+    # worst-case hours for the house to recover to livable on its own after
+    # a fully-shed peak. At the measured 1.2 C/h a 9 C deficit (10 -> 19)
+    # is ~7.5 h; David's lived estimate was 5-6 h. Used by
+    # back_during_recovery below; the per-arrival lead is computed from the
+    # live temperature instead (recovery_minutes).
+    min: 0
+    max: 12
+    step: 0.5
+    initial: 6
+    unit_of_measurement: h
+    icon: mdi:clock-end
+
+input_datetime:
+  homeostat_expected_return:
+    name: Homeostat expected return
+    # manual estimate of when someone is next home; ignored once in the
+    # past, so it needs no reset automation. Later: written by a calendar
+    # automation instead of a dashboard knob.
+    has_date: true
+    has_time: true
+    icon: mdi:home-clock
+
+template:
+  - sensor:
+      - name: homeostat_occupancy
+        unique_id: homeostat_occupancy
+        icon: mdi:account-question
+        state: >
+          {% if is_state('alarm_control_panel.home_alarm', 'armed_away') %}
+            away
+          {% else %}
+            {% set mf = states.binary_sensor.alarm_main_floor %}
+            {% set bs = states.binary_sensor.alarm_basement %}
+            {% set quiet = mf is not none and bs is not none
+               and mf.state == 'off' and bs.state == 'off'
+               and (now() - mf.last_changed).total_seconds() > 1800
+               and (now() - bs.last_changed).total_seconds() > 1800 %}
+            {% if is_state('input_boolean.homeostat_sleep_override', 'on')
+                  or (is_state('sun.sun', 'below_horizon') and quiet) %}
+              home_asleep
+            {% else %}
+              home
+            {% endif %}
+          {% endif %}
+
+  - binary_sensor:
+      - name: homeostat_back_during_recovery
+        unique_id: homeostat_back_during_recovery
+        icon: mdi:home-clock
+        # Winter peak economics: the preheat boost only pays if someone is
+        # home during the peak or before the house has recovered on its own
+        # (recovery_hours after peak end). No peak announced or no return
+        # estimate = on, the comfort-safe default; bare preheat requires
+        # positive evidence of absence - an estimate past the horizon, or a
+        # floor that proves it (the floor is a guaranteed minimum absence).
+        # NOTE: references hydroqc's peak-end directly; when merging,
+        # consider a generic homeostat_grid_peak_end wrapper to keep the
+        # provider-swap isolation that grid_peak_now/preheat_now have.
+        state: >
+          {% set peak_end = states('sensor.hydro_quebec_maison_fin_prochaine_pointe') | as_datetime(none) %}
+          {% if peak_end is none %}
+            true
+          {% else %}
+            {% set horizon = peak_end + timedelta(hours=states('input_number.homeostat_recovery_hours') | float(5)) %}
+            {% set eta = states('sensor.homeostat_return_eta') | float(0) %}
+            {% set floor = states('sensor.homeostat_return_floor') | float(0) %}
+            {% set absent_estimated = eta > 0 and now() + timedelta(minutes=eta) >= horizon %}
+            {% set absent_proven = now() + timedelta(minutes=floor) >= horizon %}
+            {{ not (absent_estimated or absent_proven) }}
+          {% endif %}
+
+      - name: homeostat_heading_home
+        unique_id: homeostat_heading_home
+        icon: mdi:home-import-outline
+        # confirmed en route, not merely nearby: the car is navigating home
+        # AND the car is with David (unknown car/person position fails the
+        # guard - never confirm returning on missing data). Sources are
+        # OR'ed; add more as they prove out (companion-app driving
+        # detection + proximity direction, transit apps).
+        state: >
+          {{ is_state('device_tracker.pointer_route', 'home')
+             and distance('device_tracker.pointer_location', 'person.david_racine')
+                 | float(999) < 1 }}
+
+  - sensor:
+      - name: homeostat_return_floor
+        unique_id: homeostat_return_floor
+        unit_of_measurement: min
+        state_class: measurement
+        icon: mdi:map-marker-distance
+        # earliest possible arrival. Primary: live travel time home for
+        # David's phone (Waze integration, knows night vs rush hour).
+        # Fallback: distance / 100 km/h. Floored to 5 min (a lower bound
+        # must round down to stay true); unknown GPS gives 0, the vacuously
+        # true floor.
+        state: >
+          {% set travel = states('sensor.david_time_to_home') | float(0) %}
+          {% if travel > 0 %}
+            {{ (travel / 5) | round(0, 'floor') * 5 }}
+          {% else %}
+            {{ (distance('zone.home', 'person.david_racine') | float(0)
+                * 60 / 100 / 5) | round(0, 'floor') * 5 }}
+          {% endif %}
+
+      - name: homeostat_return_eta
+        unique_id: homeostat_return_eta
+        unit_of_measurement: min
+        state_class: measurement
+        icon: mdi:home-clock-outline
+        # 0 = no estimate (same convention as the comfort hold). Confirmed
+        # heading home = "worst case, home in floor minutes", so the floor
+        # is the estimate; real estimates are held at >= 5 min so they can
+        # never collapse to 0.
+        state: >
+          {% if is_state('binary_sensor.homeostat_heading_home', 'on') %}
+            {{ [states('sensor.homeostat_return_floor') | float(0), 5] | max }}
+          {% else %}
+            {% set manual_ts = state_attr('input_datetime.homeostat_expected_return', 'timestamp') | float(0) %}
+            {% set mins = (manual_ts - now().timestamp()) / 60 %}
+            {% if mins > 0 %}
+              {{ (mins / 5) | round(0, 'ceil') * 5 }}
+            {% else %}
+              0
+            {% endif %}
+          {% endif %}
+        attributes:
+          source: >
+            {% if is_state('binary_sensor.homeostat_heading_home', 'on') %}
+              heading_home
+            {% elif (state_attr('input_datetime.homeostat_expected_return', 'timestamp') | float(0))
+                    > now().timestamp() %}
+              manual
+            {% else %}
+              none
+            {% endif %}
+
+      - name: homeostat_recovery_minutes
+        unique_id: homeostat_recovery_minutes
+        unit_of_measurement: min
+        state_class: measurement
+        icon: mdi:thermometer-chevron-up
+        # time to bring the main zone back to livable (19C, not full
+        # comfort - finishing the warm-up while home is acceptable) at the
+        # measured recovery rate: 0C intercept from the knob, -0.015 C/h
+        # per degree colder outside (winter 2025-26 fit, see the knob's
+        # comment), clamped to a 0.8 floor below the measured range. Warm
+        # house (>= 19C) = 0: the daemon then applies its plain ~20 min
+        # comfort pre-start.
+        state: >
+          {% set t = state_attr('climate.neviweb130_climate_hvac', 'current_temperature') | float(19) %}
+          {% set t_out = states('sensor.maison_temperature') | float(0) %}
+          {% set rate = [states('input_number.homeostat_recovery_rate') | float(1.4)
+                         + 0.015 * t_out, 0.8] | max %}
+          {{ ([(19 - t) * 60 / rate, 0] | max / 5) | round(0, 'ceil') * 5 }}
