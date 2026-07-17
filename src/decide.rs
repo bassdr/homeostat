@@ -6,20 +6,11 @@
 
 use crate::state::{EnergyPeriod, HvacMode, Inputs, Occupancy};
 
-/// Bounds for the final main-zone setpoint after the comfort offset.
-const SETPOINT_MIN: f64 = 15.0;
-const SETPOINT_MAX: f64 = 29.0;
-/// Floor for the comfort hold in cool mode: a heating-grade hold reaching
-/// a cooling device is the July-7 output shape, whatever triggered it.
-const SETPOINT_MIN_COOL: f64 = 20.0;
-
 /// The aux zone is never commanded off, only down to this frost floor
 /// (the Sinope minimum): a setpoint persisted in the device keeps
 /// defending the house even if daemon, HA and network all die. Only
 /// deferrable loads (load_shed) are ever fully off.
 const AUX_FROST_FLOOR: f64 = 5.0;
-/// Ceiling for the aux comfort hold (matches the preheat boost).
-const AUX_SETPOINT_MAX: f64 = 26.0;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FanMode {
@@ -111,23 +102,12 @@ pub fn decide(i: &Inputs) -> Desired {
         },
     };
 
-    // Honor a manual hold (absolute setpoint, standard thermostat
-    // semantics) on the main zone when someone is home and no grid event is
-    // running (peak/preheat always win). The reset-on-away automation in HA
-    // is belt and suspenders on top of this. The clamp is mode-aware: a
-    // stale heat-season hold (16) landing in cool mode must not command
-    // the AC to 16C - that is the July-7 shape, user-triggered.
-    let main_setpoint =
-        if i.occupancy.is_home() && i.energy_period == Normal && i.comfort_setpoint > 0.0 {
-            let min = if main_mode == Cool {
-                SETPOINT_MIN_COOL
-            } else {
-                SETPOINT_MIN
-            };
-            i.comfort_setpoint.clamp(min, SETPOINT_MAX)
-        } else {
-            main_setpoint
-        };
+    // Manual comfort holds are NOT applied here: a hold is enforced by the
+    // HA override (the wire stands down and the human's setpoint persists
+    // in the device), so `desired` stays the pure matrix decision - what
+    // homeostat *would* do. The gap between desired and the device is the
+    // override's visible cost. The held value lives in HA only, as a record
+    // (dashboard + tuning collector); the daemon does not read it.
 
     // circulation on off days (mode off + fan on) and whenever someone is
     // home; fan is an output-side concept only - see state.rs::HvacMode
@@ -148,15 +128,10 @@ pub fn decide(i: &Inputs) -> Desired {
         (Cool | Off, _) => AUX_FROST_FLOOR,
         (Heat, Peak) => AUX_FROST_FLOOR,
         (Heat, Preheat) => 26.0,
-        // same hold semantics as the main zone: someone home adjusted a
-        // basement thermostat, honor it outside grid events, ignore stale
-        // holds when away (the capture automation only records while home
-        // and live, the reset-on-away clears both holds)
+        // aux holds, like main holds, are enforced by the HA override, not
+        // here - this stays the pure matrix decision
         (Heat, Normal) => {
-            if i.occupancy.is_home() && i.aux_comfort_setpoint > 0.0 {
-                i.aux_comfort_setpoint
-                    .clamp(AUX_FROST_FLOOR, AUX_SETPOINT_MAX)
-            } else if i.aux_zone_occupied {
+            if i.aux_zone_occupied {
                 19.0
             } else {
                 16.0
@@ -184,8 +159,6 @@ mod tests {
             energy_period,
             main_mode,
             aux_zone_occupied: false,
-            comfort_setpoint: 0.0,
-            aux_comfort_setpoint: 0.0,
             back_during_recovery: true,
         }
     }
@@ -208,31 +181,24 @@ mod tests {
                 for occupancy in [Home, HomeAsleep, AwayReturning, Away, AwayFar] {
                     for back_during_recovery in [true, false] {
                         for aux_zone_occupied in [true, false] {
-                            for comfort_setpoint in [0.0, 5.0, 29.0] {
-                                // hostile aux holds: the clamp must hold the floor
-                                for aux_comfort_setpoint in [0.0, 2.0, 30.0] {
-                                    let i = Inputs {
-                                        occupancy,
-                                        energy_period,
-                                        main_mode,
-                                        aux_zone_occupied,
-                                        comfort_setpoint,
-                                        aux_comfort_setpoint,
-                                        back_during_recovery,
-                                    };
-                                    let d = decide(&i);
-                                    if main_mode != Cool {
-                                        assert!(
-                                            d.main_setpoint >= 10.0,
-                                            "main-zone freeze floor violated: {i:?} -> {d:?}"
-                                        );
-                                    }
-                                    assert!(
-                                        d.aux_zone_setpoint >= AUX_FROST_FLOOR,
-                                        "aux-zone freeze floor violated: {i:?} -> {d:?}"
-                                    );
-                                }
+                            let i = Inputs {
+                                occupancy,
+                                energy_period,
+                                main_mode,
+                                aux_zone_occupied,
+                                back_during_recovery,
+                            };
+                            let d = decide(&i);
+                            if main_mode != Cool {
+                                assert!(
+                                    d.main_setpoint >= 10.0,
+                                    "main-zone freeze floor violated: {i:?} -> {d:?}"
+                                );
                             }
+                            assert!(
+                                d.aux_zone_setpoint >= AUX_FROST_FLOOR,
+                                "aux-zone freeze floor violated: {i:?} -> {d:?}"
+                            );
                         }
                     }
                 }
@@ -241,10 +207,8 @@ mod tests {
     }
 
     /// The generalized July-7 invariant: no reachable decision may pair
-    /// cool mode with a heating-grade setpoint, whatever produced it -
-    /// matrix cell, stale state, or a leftover heat-season comfort hold
-    /// punched in from the dashboard. Sweeps every input combination
-    /// including hostile hold values.
+    /// cool mode with a heating-grade setpoint (the incident's output
+    /// shape). Sweeps every input combination.
     #[test]
     fn cool_mode_never_carries_a_heating_grade_setpoint() {
         use EnergyPeriod::*;
@@ -255,20 +219,18 @@ mod tests {
             for energy_period in [Normal, Preheat, Peak] {
                 for occupancy in [Home, HomeAsleep, AwayReturning, Away, AwayFar] {
                     for back_during_recovery in [true, false] {
-                        for comfort_setpoint in [0.0, 5.0, 16.0, 22.0, 29.0] {
+                        for aux_zone_occupied in [true, false] {
                             let i = Inputs {
                                 occupancy,
                                 energy_period,
                                 main_mode,
-                                aux_zone_occupied: false,
-                                comfort_setpoint,
-                                aux_comfort_setpoint: 16.0,
+                                aux_zone_occupied,
                                 back_during_recovery,
                             };
                             let d = decide(&i);
                             if d.main_mode == Cool {
                                 assert!(
-                                    d.main_setpoint >= SETPOINT_MIN_COOL,
+                                    d.main_setpoint >= 20.0,
                                     "heating-grade setpoint under cool mode \
                                      (the July-7 shape): {i:?} -> {d:?}"
                                 );
@@ -339,70 +301,6 @@ mod tests {
     }
 
     #[test]
-    fn comfort_hold_honored_at_home_but_never_during_grid_events_or_away() {
-        // hold value chosen to differ from every matrix cell it meets, so
-        // each assertion can only pass for the right reason
-        let mut i = inputs(Occupancy::Home, EnergyPeriod::Normal, HvacMode::Heat);
-        i.comfort_setpoint = 23.5;
-        assert_eq!(
-            decide(&i).main_setpoint,
-            23.5,
-            "manual hold applied at home"
-        );
-
-        i.occupancy = Occupancy::HomeAsleep;
-        assert_eq!(
-            decide(&i).main_setpoint,
-            23.5,
-            "hold survives schedule transitions"
-        );
-
-        i.energy_period = EnergyPeriod::Peak;
-        assert_eq!(
-            decide(&i).main_setpoint,
-            16.0,
-            "peak overrides the hold's effect"
-        );
-
-        i.energy_period = EnergyPeriod::Preheat;
-        assert_eq!(
-            decide(&i).main_setpoint,
-            24.0,
-            "preheat overrides the hold's effect"
-        );
-
-        i.energy_period = EnergyPeriod::Normal;
-        assert_eq!(
-            decide(&i).main_setpoint,
-            23.5,
-            "the hold's value survives grid events and resumes after them"
-        );
-
-        i.occupancy = Occupancy::Away;
-        assert_eq!(
-            decide(&i).main_setpoint,
-            19.0,
-            "a stale hold is ignored when away"
-        );
-    }
-
-    #[test]
-    fn comfort_hold_zero_means_automatic_and_values_are_clamped() {
-        let mut i = inputs(Occupancy::Home, EnergyPeriod::Normal, HvacMode::Heat);
-        assert_eq!(
-            decide(&i).main_setpoint,
-            22.5,
-            "0 = no hold, matrix applies"
-        );
-        i.comfort_setpoint = 5.0;
-        assert_eq!(
-            decide(&i).main_setpoint,
-            15.0,
-            "a lowball hold clamps to SETPOINT_MIN"
-        );
-    }
-
-    #[test]
     fn bare_preheat_when_provably_absent_past_the_recovery_horizon() {
         let mut i = inputs(Occupancy::Away, EnergyPeriod::Preheat, HvacMode::Heat);
         assert_eq!(decide(&i).main_setpoint, 23.0, "assume back = boost");
@@ -444,50 +342,6 @@ mod tests {
         assert_eq!(decide(&i).aux_zone_setpoint, AUX_FROST_FLOOR);
     }
 
-    #[test]
-    fn aux_hold_honored_at_home_but_never_during_grid_events_or_away() {
-        let mut i = inputs(Occupancy::Home, EnergyPeriod::Normal, HvacMode::Heat);
-        i.aux_comfort_setpoint = 21.0;
-        assert_eq!(decide(&i).aux_zone_setpoint, 21.0, "hold applied at home");
-
-        i.aux_zone_occupied = true;
-        assert_eq!(
-            decide(&i).aux_zone_setpoint,
-            21.0,
-            "hold outranks occupancy"
-        );
-
-        i.energy_period = EnergyPeriod::Peak;
-        assert_eq!(
-            decide(&i).aux_zone_setpoint,
-            AUX_FROST_FLOOR,
-            "peak overrides the hold"
-        );
-
-        i.energy_period = EnergyPeriod::Preheat;
-        assert_eq!(
-            decide(&i).aux_zone_setpoint,
-            26.0,
-            "preheat overrides the hold"
-        );
-
-        i.energy_period = EnergyPeriod::Normal;
-        i.occupancy = Occupancy::Away;
-        assert_eq!(
-            decide(&i).aux_zone_setpoint,
-            19.0,
-            "a stale hold is ignored when away (occupied base applies)"
-        );
-
-        i.occupancy = Occupancy::Home;
-        i.aux_comfort_setpoint = 2.0;
-        assert_eq!(
-            decide(&i).aux_zone_setpoint,
-            AUX_FROST_FLOOR,
-            "a lowball hold clamps to the frost floor"
-        );
-    }
-
     /// Without heat demand the aux zone (basement baseboards) holds
     /// exactly the frost floor: no comfort heating (caught in shadow on an
     /// off day - the old (_, Normal) arm armed the basement at 16C in
@@ -511,10 +365,6 @@ mod tests {
                                 energy_period,
                                 main_mode,
                                 aux_zone_occupied,
-                                comfort_setpoint: 0.0,
-                                // a lingering hold must not leak into days
-                                // with no heat demand
-                                aux_comfort_setpoint: 22.0,
                                 back_during_recovery,
                             };
                             let d = decide(&i);
