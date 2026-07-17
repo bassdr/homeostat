@@ -115,11 +115,16 @@ pub fn decide(i: &Inputs) -> Desired {
         FanMode::Auto
     };
 
+    // The aux zone is heat-only equipment: it exists in the decision only
+    // when the day demands heating. Off days keep it off - a shoulder-
+    // season basement may sit below these setpoints without that being a
+    // reason to burn watts (and a grid preheat on an off day must not
+    // boost a zone that had no business heating at all).
     let aux_zone_setpoint = match (i.main_mode, i.energy_period) {
-        (Cool, _) => None,
-        (_, Peak) => Some(5.0),
-        (_, Preheat) => Some(26.0),
-        (_, Normal) => Some(if i.aux_zone_occupied { 19.0 } else { 16.0 }),
+        (Cool | Off, _) => None,
+        (Heat, Peak) => Some(5.0),
+        (Heat, Preheat) => Some(26.0),
+        (Heat, Normal) => Some(if i.aux_zone_occupied { 19.0 } else { 16.0 }),
     };
 
     Desired {
@@ -357,5 +362,41 @@ mod tests {
         assert_eq!(decide(&i).aux_zone_setpoint, Some(19.0));
         i.main_mode = HvacMode::Cool;
         assert_eq!(decide(&i).aux_zone_setpoint, None);
+    }
+
+    /// The aux zone (basement baseboards) is heat-only equipment: no
+    /// reachable decision may command it unless the day demands heating.
+    /// Caught in shadow on an off day: the old (_, Normal) arm armed the
+    /// basement at 16C in July, and (Off, Preheat) would have boosted a
+    /// zone to 26C that had no business heating at all.
+    #[test]
+    fn aux_zone_never_heats_unless_main_mode_is_heat() {
+        use EnergyPeriod::*;
+        use HvacMode::*;
+        use Occupancy::*;
+
+        for main_mode in [Off, Cool] {
+            for energy_period in [Normal, Preheat, Peak] {
+                for occupancy in [Home, HomeAsleep, AwayReturning, Away, AwayFar] {
+                    for back_during_recovery in [true, false] {
+                        for aux_zone_occupied in [true, false] {
+                            let i = Inputs {
+                                occupancy,
+                                energy_period,
+                                main_mode,
+                                aux_zone_occupied,
+                                comfort_setpoint: 0.0,
+                                back_during_recovery,
+                            };
+                            let d = decide(&i);
+                            assert_eq!(
+                                d.aux_zone_setpoint, None,
+                                "aux zone armed without heat demand: {i:?} -> {d:?}"
+                            );
+                        }
+                    }
+                }
+            }
+        }
     }
 }
