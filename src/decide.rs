@@ -49,7 +49,10 @@ pub struct Desired {
     pub fan_mode: FanMode,
     /// None = basement thermostats off (cooling season).
     pub aux_zone_setpoint: Option<f64>,
-    pub water_heater_on: bool,
+    /// Shed deferrable loads now. Policy, not a device: the wires decide
+    /// what hangs off it (water heater off, EV-charging warning, anything
+    /// you want forced off during a grid event).
+    pub shed_loads: bool,
 }
 
 pub fn decide(i: &Inputs) -> Desired {
@@ -140,7 +143,7 @@ pub fn decide(i: &Inputs) -> Desired {
         main_setpoint,
         fan_mode,
         aux_zone_setpoint,
-        water_heater_on: i.energy_period != Peak,
+        shed_loads: i.energy_period == Peak,
     }
 }
 
@@ -232,9 +235,15 @@ mod tests {
     fn peak_sheds_all_loads() {
         let i = inputs(Occupancy::Home, EnergyPeriod::Peak, Season::Heat);
         let d = decide(&i);
-        assert!(!d.water_heater_on);
+        assert!(d.shed_loads);
         assert_eq!(d.main_setpoint, 16.0);
         assert_eq!(d.aux_zone_setpoint, Some(5.0));
+
+        // shedding is a peak thing only - preheat and normal keep loads on
+        for period in [EnergyPeriod::Normal, EnergyPeriod::Preheat] {
+            let d = decide(&inputs(Occupancy::Home, period, Season::Heat));
+            assert!(!d.shed_loads);
+        }
     }
 
     #[test]

@@ -7,7 +7,7 @@
 //!   single state change is what the main-zone wire automation triggers on,
 //!   so the triple is always forwarded together (the 2026-07-07 contract).
 //! - Per-value entities (setpoint as a real temperature sensor, etc.) for
-//!   history graphs and for the single-value wires (aux zone, water heater).
+//!   history graphs and for the single-value wires (aux zone, load shed).
 
 use anyhow::Result;
 use rumqttc::{AsyncClient, LastWill, MqttOptions, QoS};
@@ -25,7 +25,7 @@ const TOPIC_MAIN_SETPOINT: &str = "homeostat/desired/main_setpoint";
 const TOPIC_MAIN_MODE: &str = "homeostat/desired/main_mode";
 const TOPIC_FAN_MODE: &str = "homeostat/desired/fan_mode";
 const TOPIC_AUX_SETPOINT: &str = "homeostat/desired/aux_zone_setpoint";
-const TOPIC_WATER_HEATER: &str = "homeostat/desired/water_heater";
+const TOPIC_LOAD_SHED: &str = "homeostat/desired/load_shed";
 const TOPIC_HEARTBEAT: &str = "homeostat/heartbeat";
 
 pub struct Mqtt {
@@ -151,10 +151,10 @@ impl Mqtt {
             (
                 "binary_sensor",
                 entity(
-                    "desired water heater",
-                    "homeostat_desired_water_heater",
-                    TOPIC_WATER_HEATER,
-                    json!({ "payload_on": "on", "payload_off": "off", "icon": "mdi:water-boiler" }),
+                    "desired load shed",
+                    "homeostat_desired_load_shed",
+                    TOPIC_LOAD_SHED,
+                    json!({ "payload_on": "on", "payload_off": "off", "icon": "mdi:transmission-tower-off" }),
                 ),
             ),
         ];
@@ -168,6 +168,14 @@ impl Mqtt {
                     true,
                     config.to_string(),
                 )
+                .await?;
+        }
+
+        // Retired outputs: an empty retained payload on the old discovery
+        // topic makes HA delete the entity (registry entry included).
+        for topic in ["homeassistant/binary_sensor/homeostat_desired_water_heater/config"] {
+            self.client
+                .publish(topic, QoS::AtLeastOnce, true, "")
                 .await?;
         }
         Ok(())
@@ -185,10 +193,10 @@ impl Mqtt {
             "main_setpoint": desired.main_setpoint,
             "fan_mode": desired.fan_mode.as_str(),
             "aux_zone_setpoint": desired.aux_zone_setpoint,
-            "water_heater": if desired.water_heater_on { "on" } else { "off" },
+            "shed_loads": if desired.shed_loads { "on" } else { "off" },
             "inputs": format!("{inputs:?}"),
         });
-        let water = if desired.water_heater_on { "on" } else { "off" };
+        let shed = if desired.shed_loads { "on" } else { "off" };
 
         // per-value topics first, the combined state last: by the time the
         // main wire fires on the combined change, every value is current
@@ -200,7 +208,7 @@ impl Mqtt {
                 TOPIC_AUX_SETPOINT,
                 desired.aux_zone_setpoint.unwrap_or(0.0).to_string(),
             ),
-            (TOPIC_WATER_HEATER, water.to_owned()),
+            (TOPIC_LOAD_SHED, shed.to_owned()),
             (TOPIC_ATTRS, attrs.to_string()),
             (TOPIC_STATE, state),
         ] {
