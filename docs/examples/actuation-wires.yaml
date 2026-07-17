@@ -82,7 +82,10 @@ automation:
       # heating zones are never off: the daemon publishes a frost floor
       # (5C) instead of 0 when the zone has no comfort duty, and the wire
       # clamps as belt and suspenders - a setpoint persisted in the device
-      # keeps defending the house even if everything upstream dies
+      # keeps defending the house even if everything upstream dies.
+      # WARNING: this wire assumes HEAT-ONLY aux devices (baseboards). If
+      # your aux zone can cool, a 5C target while it sits in cool mode
+      # would freeze the zone - guard the hvac mode explicitly first.
       - variables:
           target: "{{ [states('sensor.homeostat_desired_aux_zone_setpoint') | float(5), 5] | max }}"
       - action: climate.turn_on
