@@ -63,7 +63,9 @@ pub fn decide(i: &Inputs) -> Desired {
         Cool => match i.occupancy {
             Home => 25.0,
             HomeAsleep => 24.0,
-            AwayReturning => 26.0,
+            // returning = the home target, early: the lead time exists so
+            // the house is *at* comfort on arrival, not approaching it
+            AwayReturning => 25.0,
             Away | AwayFar => 28.0,
         },
         // On an off day (no conditioning demanded) the setpoint is not
@@ -72,7 +74,8 @@ pub fn decide(i: &Inputs) -> Desired {
         Heat | Off => match (i.energy_period, i.occupancy) {
             (Normal, Home) => 22.5,
             (Normal, HomeAsleep) => 22.5,
-            (Normal, AwayReturning) => 21.0,
+            // returning = the home target, early (see the Cool arm)
+            (Normal, AwayReturning) => 22.5,
             (Normal, Away) => 19.0,
             (Normal, AwayFar) => 17.0,
             (Preheat, Home) => 25.0,
