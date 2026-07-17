@@ -71,7 +71,7 @@ Everything appears in HA automatically under one "Homeostat" device:
 | `sensor.homeostat_desired_main_setpoint` | per-value view, °C — for history graphs |
 | `sensor.homeostat_desired_main_mode` | per-value view (`heat`/`cool`/`off`) |
 | `sensor.homeostat_desired_fan_mode` | per-value view (`on`/`auto`) |
-| `sensor.homeostat_desired_aux_zone_setpoint` | secondary-zone target, °C; `0` = zone off |
+| `sensor.homeostat_desired_aux_zone_setpoint` | secondary-zone target, °C — never `off`: zones with no comfort duty get a 5 °C frost floor (a setpoint persisted in the device defends the house even if the daemon and HA die) |
 | `binary_sensor.homeostat_desired_load_shed` | `on` = shed deferrable loads *now* (water heater, EV charging, whatever you wire to it) |
 | availability | MQTT last-will: everything flips `unavailable` the moment the daemon dies |
 | `homeostat/heartbeat` (topic) | retained unix timestamp, for a dead-man alert |
