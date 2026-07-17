@@ -9,6 +9,7 @@ pub const ENTITY_ENERGY_PERIOD: &str = "sensor.homeostat_energy_period";
 pub const ENTITY_MAIN_MODE: &str = "sensor.homeostat_main_mode";
 pub const ENTITY_AUX_ZONE_OCCUPIED: &str = "binary_sensor.homeostat_aux_zone_occupied";
 pub const ENTITY_COMFORT_SETPOINT: &str = "input_number.homeostat_comfort_setpoint";
+pub const ENTITY_AUX_COMFORT_SETPOINT: &str = "input_number.homeostat_aux_comfort_setpoint";
 pub const ENTITY_RETURN_ETA: &str = "sensor.homeostat_return_eta";
 pub const ENTITY_RETURN_FLOOR: &str = "sensor.homeostat_return_floor";
 pub const ENTITY_BACK_DURING_RECOVERY: &str = "binary_sensor.homeostat_back_during_recovery";
@@ -169,6 +170,10 @@ pub struct Inputs {
     pub aux_zone_occupied: bool,
     /// Manual hold: absolute setpoint in degrees C; 0 = none (automatic).
     pub comfort_setpoint: f64,
+    /// Manual hold for the aux zone, same convention. Captured by a
+    /// perception automation when someone adjusts a basement thermostat
+    /// while the homeostat is live; honored home+normal+heat only.
+    pub aux_comfort_setpoint: f64,
     /// Someone is expected home during the grid event or within the
     /// recovery horizon after it ends. Unknown = true: the comfort-safe
     /// default is a normal preheat; the bare-preheat saving needs positive
@@ -188,6 +193,7 @@ pub struct RawInputs {
     /// unavailable/unknown means "no hold" / "no estimate" and must not
     /// suspend decisions.
     comfort_setpoint: f64,
+    aux_comfort_setpoint: f64,
     return_eta_min: f64,
     return_floor_min: f64,
     recovery_min: f64,
@@ -213,6 +219,7 @@ impl RawInputs {
                 },
             ),
             ENTITY_COMFORT_SETPOINT => Self::set_f64(&mut self.comfort_setpoint, state),
+            ENTITY_AUX_COMFORT_SETPOINT => Self::set_f64(&mut self.aux_comfort_setpoint, state),
             ENTITY_RETURN_ETA => Self::set_f64(&mut self.return_eta_min, state),
             ENTITY_RETURN_FLOOR => Self::set_f64(&mut self.return_floor_min, state),
             ENTITY_RECOVERY_MINUTES => Self::set_f64(&mut self.recovery_min, state),
@@ -259,6 +266,7 @@ impl RawInputs {
             main_mode: self.main_mode?,
             aux_zone_occupied: self.aux_zone_occupied?,
             comfort_setpoint: self.comfort_setpoint,
+            aux_comfort_setpoint: self.aux_comfort_setpoint,
             back_during_recovery: self.back_during_recovery.unwrap_or(true),
         })
     }
