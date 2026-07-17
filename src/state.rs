@@ -6,7 +6,7 @@
 /// Entities the daemon subscribes to (perception layer, computed in HA).
 pub const ENTITY_OCCUPANCY: &str = "sensor.homeostat_occupancy";
 pub const ENTITY_ENERGY_PERIOD: &str = "sensor.homeostat_energy_period";
-pub const ENTITY_SEASON: &str = "sensor.homeostat_season";
+pub const ENTITY_MAIN_MODE: &str = "sensor.homeostat_main_mode";
 pub const ENTITY_AUX_ZONE_OCCUPIED: &str = "binary_sensor.homeostat_aux_zone_occupied";
 pub const ENTITY_COMFORT_SETPOINT: &str = "input_number.homeostat_comfort_setpoint";
 pub const ENTITY_RETURN_ETA: &str = "sensor.homeostat_return_eta";
@@ -128,20 +128,33 @@ impl EnergyPeriod {
     }
 }
 
+/// Main-zone conditioning vocabulary, shared by the perception input
+/// (`sensor.homeostat_main_mode`: what the day demands - heat, cool, or
+/// nothing) and the published decision (`desired_main_mode`: what to
+/// command). "Fan" is deliberately not a value here: circulation is an
+/// output-side concept (`desired_fan_mode`) that some houses don't have.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Season {
+pub enum HvacMode {
     Heat,
-    Fan,
     Cool,
+    Off,
 }
 
-impl Season {
+impl HvacMode {
     pub fn parse(s: &str) -> Option<Self> {
         match s {
             "heat" => Some(Self::Heat),
-            "fan" => Some(Self::Fan),
             "cool" => Some(Self::Cool),
+            "off" => Some(Self::Off),
             _ => None,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Heat => "heat",
+            Self::Cool => "cool",
+            Self::Off => "off",
         }
     }
 }
@@ -151,7 +164,8 @@ impl Season {
 pub struct Inputs {
     pub occupancy: Occupancy,
     pub energy_period: EnergyPeriod,
-    pub season: Season,
+    /// What the day demands of the main zone (from the outdoor forecast).
+    pub main_mode: HvacMode,
     pub aux_zone_occupied: bool,
     /// Manual hold: absolute setpoint in degrees C; 0 = none (automatic).
     pub comfort_setpoint: f64,
@@ -168,7 +182,7 @@ pub struct Inputs {
 pub struct RawInputs {
     presence: Option<Presence>,
     energy_period: Option<EnergyPeriod>,
-    season: Option<Season>,
+    main_mode: Option<HvacMode>,
     aux_zone_occupied: Option<bool>,
     /// Plain f64, not Option: these inputs are optional by design -
     /// unavailable/unknown means "no hold" / "no estimate" and must not
@@ -189,7 +203,7 @@ impl RawInputs {
         match entity_id {
             ENTITY_OCCUPANCY => Self::set(&mut self.presence, Presence::parse(state)),
             ENTITY_ENERGY_PERIOD => Self::set(&mut self.energy_period, EnergyPeriod::parse(state)),
-            ENTITY_SEASON => Self::set(&mut self.season, Season::parse(state)),
+            ENTITY_MAIN_MODE => Self::set(&mut self.main_mode, HvacMode::parse(state)),
             ENTITY_AUX_ZONE_OCCUPIED => Self::set(
                 &mut self.aux_zone_occupied,
                 match state {
@@ -242,7 +256,7 @@ impl RawInputs {
                 self.recovery_min,
             ),
             energy_period: self.energy_period?,
-            season: self.season?,
+            main_mode: self.main_mode?,
             aux_zone_occupied: self.aux_zone_occupied?,
             comfort_setpoint: self.comfort_setpoint,
             back_during_recovery: self.back_during_recovery.unwrap_or(true),
@@ -259,7 +273,7 @@ mod tests {
         let mut raw = RawInputs::default();
         raw.ingest(ENTITY_OCCUPANCY, "home");
         raw.ingest(ENTITY_ENERGY_PERIOD, "normal");
-        raw.ingest(ENTITY_SEASON, "heat");
+        raw.ingest(ENTITY_MAIN_MODE, "heat");
         raw.ingest(ENTITY_AUX_ZONE_OCCUPIED, "off");
         raw.ingest(ENTITY_COMFORT_SETPOINT, "unavailable");
         let inputs = raw
@@ -273,7 +287,7 @@ mod tests {
         let mut raw = RawInputs::default();
         raw.ingest(ENTITY_OCCUPANCY, "unknown");
         raw.ingest(ENTITY_ENERGY_PERIOD, "normal");
-        raw.ingest(ENTITY_SEASON, "heat");
+        raw.ingest(ENTITY_MAIN_MODE, "heat");
         raw.ingest(ENTITY_AUX_ZONE_OCCUPIED, "off");
         assert!(
             raw.complete().is_none(),
@@ -288,7 +302,7 @@ mod tests {
         let mut raw = RawInputs::default();
         raw.ingest(ENTITY_OCCUPANCY, "away_returning");
         raw.ingest(ENTITY_ENERGY_PERIOD, "normal");
-        raw.ingest(ENTITY_SEASON, "heat");
+        raw.ingest(ENTITY_MAIN_MODE, "heat");
         raw.ingest(ENTITY_AUX_ZONE_OCCUPIED, "off");
         assert!(raw.complete().is_none());
     }
@@ -346,7 +360,7 @@ mod tests {
         let mut raw = RawInputs::default();
         raw.ingest(ENTITY_OCCUPANCY, "away");
         raw.ingest(ENTITY_ENERGY_PERIOD, "normal");
-        raw.ingest(ENTITY_SEASON, "heat");
+        raw.ingest(ENTITY_MAIN_MODE, "heat");
         raw.ingest(ENTITY_AUX_ZONE_OCCUPIED, "off");
         raw.ingest(ENTITY_RETURN_ETA, "unavailable");
         raw.ingest(ENTITY_RETURN_FLOOR, "unknown");
@@ -362,7 +376,7 @@ mod tests {
         let mut raw = RawInputs::default();
         raw.ingest(ENTITY_OCCUPANCY, "away");
         raw.ingest(ENTITY_ENERGY_PERIOD, "preheat");
-        raw.ingest(ENTITY_SEASON, "heat");
+        raw.ingest(ENTITY_MAIN_MODE, "heat");
         raw.ingest(ENTITY_AUX_ZONE_OCCUPIED, "off");
         let inputs = raw.complete().unwrap();
         assert!(

@@ -48,7 +48,7 @@ with dummy source names is in
 |---|---|---|
 | `sensor.homeostat_occupancy` | `home` `home_asleep` `away` | presence facts only |
 | `sensor.homeostat_energy_period` | `normal` `preheat` `peak` | your demand-response program (Hydro-Québec winter credit, Tempo, Octopus events, plain TOU) |
-| `sensor.homeostat_season` | `heat` `fan` `cool` | which physical mode the climate calls for |
+| `sensor.homeostat_main_mode` | `heat` `cool` `off` | what the day demands of the main zone; `off` = no conditioning (the daemon still decides circulation via `desired_fan_mode`) |
 | `binary_sensor.homeostat_aux_zone_occupied` | `on`/`off` | secondary zone (e.g. basement) in use |
 | `input_number.homeostat_comfort_setpoint` | °C, `0` = automatic | manual hold; survives grid events, ignored when away |
 | `sensor.homeostat_return_eta` | minutes, `0` = no estimate | credible time-until-someone-is-home (nav, calendar, manual) |
