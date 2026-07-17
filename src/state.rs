@@ -8,8 +8,10 @@ pub const ENTITY_OCCUPANCY: &str = "sensor.homeostat_occupancy";
 pub const ENTITY_ENERGY_PERIOD: &str = "sensor.homeostat_energy_period";
 pub const ENTITY_MAIN_MODE: &str = "sensor.homeostat_main_mode";
 pub const ENTITY_AUX_ZONE_OCCUPIED: &str = "binary_sensor.homeostat_aux_zone_occupied";
-pub const ENTITY_COMFORT_SETPOINT: &str = "input_number.homeostat_comfort_setpoint";
-pub const ENTITY_AUX_COMFORT_SETPOINT: &str = "input_number.homeostat_aux_comfort_setpoint";
+// Manual comfort holds are enforced by the HA override (the wire stands
+// down; the human's setpoint persists in the device), so the daemon does
+// NOT subscribe to any comfort_setpoint entity - `desired` stays the pure
+// matrix decision and the held value lives in HA only, as a record.
 pub const ENTITY_RETURN_ETA: &str = "sensor.homeostat_return_eta";
 pub const ENTITY_RETURN_FLOOR: &str = "sensor.homeostat_return_floor";
 pub const ENTITY_BACK_DURING_RECOVERY: &str = "binary_sensor.homeostat_back_during_recovery";
@@ -168,12 +170,6 @@ pub struct Inputs {
     /// What the day demands of the main zone (from the outdoor forecast).
     pub main_mode: HvacMode,
     pub aux_zone_occupied: bool,
-    /// Manual hold: absolute setpoint in degrees C; 0 = none (automatic).
-    pub comfort_setpoint: f64,
-    /// Manual hold for the aux zone, same convention. Captured by a
-    /// perception automation when someone adjusts a basement thermostat
-    /// while the homeostat is live; honored home+normal+heat only.
-    pub aux_comfort_setpoint: f64,
     /// Someone is expected home during the grid event or within the
     /// recovery horizon after it ends. Unknown = true: the comfort-safe
     /// default is a normal preheat; the bare-preheat saving needs positive
@@ -190,10 +186,8 @@ pub struct RawInputs {
     main_mode: Option<HvacMode>,
     aux_zone_occupied: Option<bool>,
     /// Plain f64, not Option: these inputs are optional by design -
-    /// unavailable/unknown means "no hold" / "no estimate" and must not
-    /// suspend decisions.
-    comfort_setpoint: f64,
-    aux_comfort_setpoint: f64,
+    /// unavailable/unknown means "no estimate" and must not suspend
+    /// decisions.
     return_eta_min: f64,
     return_floor_min: f64,
     recovery_min: f64,
@@ -218,8 +212,6 @@ impl RawInputs {
                     _ => None,
                 },
             ),
-            ENTITY_COMFORT_SETPOINT => Self::set_f64(&mut self.comfort_setpoint, state),
-            ENTITY_AUX_COMFORT_SETPOINT => Self::set_f64(&mut self.aux_comfort_setpoint, state),
             ENTITY_RETURN_ETA => Self::set_f64(&mut self.return_eta_min, state),
             ENTITY_RETURN_FLOOR => Self::set_f64(&mut self.return_floor_min, state),
             ENTITY_RECOVERY_MINUTES => Self::set_f64(&mut self.recovery_min, state),
@@ -265,8 +257,6 @@ impl RawInputs {
             energy_period: self.energy_period?,
             main_mode: self.main_mode?,
             aux_zone_occupied: self.aux_zone_occupied?,
-            comfort_setpoint: self.comfort_setpoint,
-            aux_comfort_setpoint: self.aux_comfort_setpoint,
             back_during_recovery: self.back_during_recovery.unwrap_or(true),
         })
     }
@@ -277,17 +267,15 @@ mod tests {
     use super::*;
 
     #[test]
-    fn unavailable_comfort_hold_means_no_hold_and_does_not_suspend() {
+    fn unavailable_optional_input_does_not_suspend() {
         let mut raw = RawInputs::default();
         raw.ingest(ENTITY_OCCUPANCY, "home");
         raw.ingest(ENTITY_ENERGY_PERIOD, "normal");
         raw.ingest(ENTITY_MAIN_MODE, "heat");
         raw.ingest(ENTITY_AUX_ZONE_OCCUPIED, "off");
-        raw.ingest(ENTITY_COMFORT_SETPOINT, "unavailable");
-        let inputs = raw
-            .complete()
+        raw.ingest(ENTITY_RETURN_ETA, "unavailable");
+        raw.complete()
             .expect("an optional input must not suspend decisions");
-        assert_eq!(inputs.comfort_setpoint, 0.0);
     }
 
     #[test]

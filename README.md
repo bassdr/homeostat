@@ -50,8 +50,6 @@ with dummy source names is in
 | `sensor.homeostat_energy_period` | `normal` `preheat` `peak` | your demand-response program (Hydro-Québec winter credit, Tempo, Octopus events, plain TOU) |
 | `sensor.homeostat_main_mode` | `heat` `cool` `off` | what the day demands of the main zone; `off` = no conditioning (the daemon still decides circulation via `desired_fan_mode`) |
 | `binary_sensor.homeostat_aux_zone_occupied` | `on`/`off` | secondary zone (e.g. basement) in use |
-| `input_number.homeostat_comfort_setpoint` | °C, `0` = automatic | manual hold on the main zone; survives grid events, ignored when away. Capture automations can write it when someone adjusts the physical thermostat |
-| `input_number.homeostat_aux_comfort_setpoint` | °C, `0` = automatic | same, for the aux zone; honored only under heat demand outside grid events |
 | `sensor.homeostat_return_eta` | minutes, `0` = no estimate | credible time-until-someone-is-home (nav, calendar, manual) |
 | `sensor.homeostat_return_floor` | minutes, `0` = vacuous | earliest *possible* arrival (travel time / distance) — a lower bound, always true |
 | `sensor.homeostat_recovery_minutes` | minutes, `0` = warm enough | time to reheat the house to livable from its current temperature |
@@ -61,6 +59,13 @@ Conventions: `0` means "none/unknown" on the numeric optionals; a required
 input going `unknown`/`unavailable` *suspends* decisions (the daemon holds
 its last output rather than acting on garbage). The four return/recovery
 inputs are optional — without them you simply get plain `away` behavior.
+
+Manual overrides are **not** a daemon input. When someone adjusts a
+thermostat by hand, that is handled entirely on the HA side: a wire stops
+writing that zone so the human's setpoint persists in the device, while the
+daemon keeps publishing what it *would* do. The daemon stays a pure function
+of the perception inputs above — `desired` is always the matrix decision,
+and the gap between it and the device is the override's visible cost.
 
 ## What it produces (via MQTT discovery)
 
