@@ -79,27 +79,22 @@ automation:
       - condition: template
         value_template: "{{ has_value('sensor.homeostat_desired_aux_zone_setpoint') }}"
     actions:
+      # heating zones are never off: the daemon publishes a frost floor
+      # (5C) instead of 0 when the zone has no comfort duty, and the wire
+      # clamps as belt and suspenders - a setpoint persisted in the device
+      # keeps defending the house even if everything upstream dies
       - variables:
-          target: "{{ states('sensor.homeostat_desired_aux_zone_setpoint') | float(0) }}"
-      # 0 = zone off
-      - if:
-          - condition: template
-            value_template: "{{ target == 0 }}"
-        then:
-          - action: climate.turn_off
-            target:
-              entity_id: &aux_thermostats
-                - climate.your_aux_thermostat_1
-                - climate.your_aux_thermostat_2
-        else:
-          - action: climate.turn_on
-            target:
-              entity_id: *aux_thermostats
-          - action: climate.set_temperature
-            target:
-              entity_id: *aux_thermostats
-            data:
-              temperature: "{{ target }}"
+          target: "{{ [states('sensor.homeostat_desired_aux_zone_setpoint') | float(5), 5] | max }}"
+      - action: climate.turn_on
+        target:
+          entity_id: &aux_thermostats
+            - climate.your_aux_thermostat_1
+            - climate.your_aux_thermostat_2
+      - action: climate.set_temperature
+        target:
+          entity_id: *aux_thermostats
+        data:
+          temperature: "{{ target }}"
     mode: queued
     max: 5
 
