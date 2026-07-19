@@ -66,6 +66,9 @@ writing that zone so the human's setpoint persists in the device, while the
 daemon keeps publishing what it *would* do. The daemon stays a pure function
 of the perception inputs above — `desired` is always the matrix decision,
 and the gap between it and the device is the override's visible cost.
+Setting a zone to `off` resumes automatic. That whole override/resume
+mechanism is a pair of HA automations (one per zone), shown in
+[docs/examples/actuation-wires.yaml](docs/examples/actuation-wires.yaml).
 
 ## What it produces (via MQTT discovery)
 
@@ -84,8 +87,9 @@ Everything appears in HA automatically under one "Homeostat" device:
 
 To make something happen, write dumb single-writer wire automations: no
 conditions except a master `input_boolean` gate, no decision logic, one
-automation per device. Worked examples (main zone, aux zone, load shed,
-watchdog) with dummy device names:
+automation per device. Worked examples (main-zone / aux-zone / load-shed
+wires, per-zone override/resume, grid-conflict notifications, watchdog) with
+dummy device names:
 [docs/examples/actuation-wires.yaml](docs/examples/actuation-wires.yaml).
 The one rule that matters: **forward the main zone's mode before its
 setpoint, always both, from one automation** — see the regression-tested

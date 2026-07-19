@@ -5,10 +5,21 @@
 # entity with something real from your setup. The homeostat_* names on the
 # left are the daemon's input contract - keep those.
 #
-# The philosophy: perception publishes FACTS (who is home, what the grid is
-# doing, how cold it is); all POLICY (setpoints, thresholds, trade-offs)
-# lives in the daemon's decision matrix. Keeping these in YAML gives you a
-# fast edit -> "reload template entities" tuning loop.
+# Philosophy: perception publishes FACTS (who is home, what the grid is
+# doing, how cold it is, how far away you are). All POLICY (setpoints,
+# thresholds, trade-offs) lives in the daemon's decision matrix. Keeping
+# these in YAML gives a fast edit -> "reload template entities" tuning loop.
+#
+# The daemon reads only these entities:
+#   sensor.homeostat_occupancy          home / home_asleep / away
+#   sensor.homeostat_energy_period      normal / preheat / peak
+#   sensor.homeostat_main_mode          heat / cool / off  (what the day demands)
+#   binary_sensor.homeostat_aux_zone_occupied
+#   sensor.homeostat_return_eta         minutes; 0 = no estimate
+#   sensor.homeostat_return_floor       minutes; 0 = vacuous
+#   sensor.homeostat_recovery_minutes   minutes; 0 = warm enough
+#   binary_sensor.homeostat_back_during_recovery
+# Everything else below is intermediate plumbing that computes those.
 # =============================================================================
 
 input_boolean:
@@ -18,22 +29,34 @@ input_boolean:
     name: Homeostat active
     icon: mdi:thermostat-auto
 
-input_number:
-  homeostat_comfort_setpoint:
-    name: Homeostat comfort hold
-    # manual hold: absolute setpoint applied when someone is home outside
-    # grid events; 0 = automatic (follow the matrix)
-    min: 0
-    max: 29
-    step: 0.5
-    unit_of_measurement: °C
+  homeostat_sleep_override:
+    # force the "asleep" occupancy state (e.g. from a bedside button)
+    name: Homeostat force asleep
+    icon: mdi:sleep
 
+  homeostat_force_peak:
+    # drill knob: force a grid peak to test load-shedding out of season
+    name: Force grid peak
+    icon: mdi:transmission-tower
+
+  # "The human has the wheel": set by the override automations (see
+  # actuation-wires.yaml) when someone adjusts a zone by hand. While on, that
+  # zone's wire stands down and the manual setpoint persists in the device.
+  homeostat_main_override:
+    name: Homeostat main zone override
+    icon: mdi:hand-back-right
+  homeostat_aux_override:
+    name: Homeostat aux zone override
+    icon: mdi:hand-back-right
+
+input_number:
   homeostat_recovery_rate:
     name: Recovery rate at 0C outside
-    # how fast your heating actually warms the whole house, measured, in
+    # how fast your heating actually warms the whole house, MEASURED, in
     # C/h. Pull it from your temperature history: sustained multi-hour
-    # recovery episodes, not short bursts. Overestimating = arriving to a
-    # cold house.
+    # recovery episodes, not short bursts. This is the 0C intercept; the
+    # outdoor-temperature slope lives in the recovery_minutes template.
+    # Overestimating means arriving to a cold house.
     min: 0.5
     max: 4.5
     step: 0.1
@@ -43,24 +66,102 @@ input_number:
   homeostat_recovery_hours:
     name: Recovery horizon
     # worst-case hours for the house to reheat itself to livable after a
-    # fully-shed peak; gates the away preheat boost below
+    # fully-shed peak; gates the away preheat boost (back_during_recovery)
     min: 0
     max: 12
     step: 0.5
     initial: 6
     unit_of_measurement: h
 
+  # The hold input_numbers are written by the override automations (a manual
+  # setpoint becomes a recorded hold) and read only by the dashboard twins
+  # and the tuning collector below - the daemon does NOT read them (holds are
+  # enforced by the override standing the wire down, not by the daemon).
+  homeostat_comfort_setpoint:
+    name: Main comfort hold
+    min: 0
+    max: 29
+    step: 0.5
+    unit_of_measurement: °C
+  homeostat_aux_comfort_setpoint:
+    name: Aux comfort hold
+    min: 0
+    max: 26
+    step: 0.5
+    unit_of_measurement: °C
+
+input_select:
+  homeostat_main_mode_override:
+    # drill knob: force heat/cool/off to exercise the matrix out of season
+    # (pair with a manual grid force to test peaks in summer). auto =
+    # follow the forecast.
+    name: Force main mode
+    options:
+      - auto
+      - heat
+      - cool
+      - "off"
+    icon: mdi:test-tube
+
 input_datetime:
   homeostat_expected_return:
     name: Expected return
-    # manual "back around 17:30" estimate; ignored once in the past
+    # manual "back around 17:30" estimate; ignored once in the past, so it
+    # needs no reset. A calendar automation could write this instead.
     has_date: true
     has_time: true
 
 template:
+  # Hold sample collector: every hold is a labeled preference sample - "a
+  # human corrected the matrix; here is the value and the full context".
+  # state_class gives it long-term statistics (survives the recorder purge).
+  # Feed for periodic tuning: aggregate per (main_mode, occupancy,
+  # energy_period) and compare medians against your matrix cells.
+  - triggers:
+      - trigger: state
+        entity_id:
+          - input_number.homeostat_comfort_setpoint
+          - input_number.homeostat_aux_comfort_setpoint
+    sensor:
+      - name: homeostat_hold_sample
+        unique_id: homeostat_hold_sample
+        unit_of_measurement: °C
+        state_class: measurement
+        availability: >
+          {{ states('input_number.homeostat_comfort_setpoint') | float(0) > 0
+             or states('input_number.homeostat_aux_comfort_setpoint') | float(0) > 0 }}
+        state: >
+          {% set main = states('input_number.homeostat_comfort_setpoint') | float(0) %}
+          {{ main if main > 0
+             else states('input_number.homeostat_aux_comfort_setpoint') | float(0) }}
+        attributes:
+          zone: >
+            {{ 'main' if states('input_number.homeostat_comfort_setpoint') | float(0) > 0
+               else 'aux' }}
+          main_mode: "{{ states('sensor.homeostat_main_mode') }}"
+          occupancy: "{{ states('sensor.homeostat_occupancy') }}"
+          energy_period: "{{ states('sensor.homeostat_energy_period') }}"
+          outdoor_temp: "{{ states('sensor.your_outdoor_temperature') | float(none) }}"
+
+  # Your straight-line distance to home, snapshotted every 5 min. The
+  # approaching_home sensor compares the live distance against this to detect
+  # a sustained approach by ANY transport (bike/car/foot/transit). Kept as a
+  # plain snapshot (not a derivative/statistics helper) so it needs no extra
+  # integration. Holds km; unknown until the first tick.
+  - triggers:
+      - trigger: time_pattern
+        minutes: "/5"
+    sensor:
+      - name: homeostat_home_distance_snapshot
+        unique_id: homeostat_home_distance_snapshot
+        unit_of_measurement: km
+        state: >
+          {% set d = distance('zone.home', 'person.you') %}
+          {{ (d | round(3)) if d is not none else this.state }}
+
   - binary_sensor:
-      # Your demand-response signals. These two isolate the provider: swap
-      # utilities and only these change.
+      # Your demand-response signals. These isolate the utility: swap
+      # providers and only the grid_* sensors change.
       - name: homeostat_grid_peak_now
         unique_id: homeostat_grid_peak_now
         state: "{{ is_state('binary_sensor.your_utility_peak_active', 'on') }}"
@@ -81,24 +182,44 @@ template:
         delay_off: "00:30:00"
         state: >
           {{ is_state('binary_sensor.your_aux_zone_motion', 'on')
-             or states('media_player.your_aux_zone_tv') in ['on', 'idle', 'playing'] }}
+             or states('media_player.your_aux_zone_tv') in ['on', 'idle', 'playing']
+             or is_state('input_boolean.guest_mode', 'on') }}
+
+      - name: homeostat_approaching_home
+        unique_id: homeostat_approaching_home
+        # Transport-agnostic "on the way home": your straight-line distance to
+        # home has been shrinking. delay_on: must be sustained, so a single
+        # GPS jump does not trigger. delay_off: absorbs the 5-min snapshot
+        # reset and brief stops (a red light). Standing still is never
+        # "approaching", which keeps a stop 15 min from home Away.
+        delay_on: "00:02:00"
+        delay_off: "00:07:00"
+        state: >
+          {% set live = distance('zone.home', 'person.you') | float(-1) %}
+          {% set past = states('sensor.homeostat_home_distance_snapshot') | float(-1) %}
+          {{ live >= 0 and past >= 0 and live < past - 0.2 }}
 
       - name: homeostat_heading_home
         unique_id: homeostat_heading_home
-        # confirmed en route, not merely nearby: navigation targeting home
-        # AND the vehicle is actually with you (someone else driving your
-        # car home must not fake a return). Missing data fails the guard.
+        # confirmed en route, a pure OR over sources (add transit apps etc.):
+        #  - approaching_home: your own distance shrinking, any transport
+        #  - the car navigating home: whoever drives it will arrive, and the
+        #    house wanting warmth does not care that it is you specifically
+        # The "within N minutes" test is NOT here - it lives in the daemon
+        # (RETURNING_LEAD). heading_home just means "a credible estimate
+        # exists"; return_eta becomes the floor, and the daemon promotes to
+        # returning once the floor is within the lead.
         state: >
-          {{ is_state('device_tracker.your_car_route', 'home')
-             and distance('device_tracker.your_car', 'person.you')
-                 | float(999) < 1 }}
+          {{ is_state('binary_sensor.homeostat_approaching_home', 'on')
+             or is_state('device_tracker.your_car_route', 'home') }}
 
       - name: homeostat_back_during_recovery
         unique_id: homeostat_back_during_recovery
         # the preheat boost only pays if someone is home during the peak or
-        # before the house has recovered on its own afterwards. Unknown =
-        # on, the comfort-safe default; skipping the boost requires positive
-        # evidence of absence.
+        # before the house has recovered on its own afterwards. Unknown = on,
+        # the comfort-safe default; skipping the boost requires positive
+        # evidence of absence (an estimate past the horizon, or a floor that
+        # proves it - the floor is a guaranteed minimum absence).
         state: >
           {% set peak_end = states('sensor.homeostat_grid_peak_end') | as_datetime(none) %}
           {% if peak_end is none %}
@@ -116,36 +237,61 @@ template:
       - name: homeostat_grid_peak_end
         unique_id: homeostat_grid_peak_end
         device_class: timestamp
+        # same provider isolation as the grid_* binary sensors
         availability: "{{ has_value('sensor.your_utility_next_peak_end') }}"
         state: "{{ states('sensor.your_utility_next_peak_end') }}"
 
       - name: homeostat_occupancy
         unique_id: homeostat_occupancy
-        # presence facts only - away_returning / away_far are derived inside
-        # the daemon from the return sensors below
+        # presence facts only - the away_returning / away_far buckets are
+        # derived inside the daemon from the return sensors below
         state: >
           {% if is_state('alarm_control_panel.your_alarm', 'armed_away') %}
             away
-          {% elif is_state('sun.sun', 'below_horizon')
-                and is_state('binary_sensor.your_main_floor_motion', 'off') %}
-            home_asleep
           {% else %}
-            home
+            {% set mf = states.binary_sensor.your_main_floor_motion %}
+            {% set bs = states.binary_sensor.your_aux_zone_motion %}
+            {% set quiet = mf is not none and bs is not none
+               and mf.state == 'off' and bs.state == 'off'
+               and (now() - mf.last_changed).total_seconds() > 1800
+               and (now() - bs.last_changed).total_seconds() > 1800 %}
+            {% if is_state('input_boolean.homeostat_sleep_override', 'on')
+                  or (is_state('sun.sun', 'below_horizon') and quiet) %}
+              home_asleep
+            {% else %}
+              home
+            {% endif %}
           {% endif %}
+
+      # Dashboard twins of the hold input_numbers: unavailable when no hold,
+      # so graphs show a gap instead of a magic 0.
+      - name: homeostat_main_hold
+        unique_id: homeostat_main_hold
+        unit_of_measurement: °C
+        availability: "{{ states('input_number.homeostat_comfort_setpoint') | float(0) > 0 }}"
+        state: "{{ states('input_number.homeostat_comfort_setpoint') | float(0) }}"
+      - name: homeostat_aux_hold
+        unique_id: homeostat_aux_hold
+        unit_of_measurement: °C
+        availability: "{{ states('input_number.homeostat_aux_comfort_setpoint') | float(0) > 0 }}"
+        state: "{{ states('input_number.homeostat_aux_comfort_setpoint') | float(0) }}"
 
       - name: homeostat_return_floor
         unique_id: homeostat_return_floor
         unit_of_measurement: min
         state_class: measurement
-        # earliest POSSIBLE arrival - a lower bound, always true. Best
-        # source: a live travel-time-home sensor (Waze/Google integration,
-        # origin = your person entity). Fallback: distance at highway speed.
-        # Round DOWN (a lower bound must stay true); unknown GPS gives 0,
-        # the vacuously true floor.
+        # earliest POSSIBLE arrival - a lower bound, never an overestimate,
+        # so it is the min over transport modes with a live value: driving
+        # (a travel-time-home integration) and optionally transit, for the
+        # windows where the train beats the car. Fallback: distance / 100
+        # km/h. Round DOWN (a lower bound must stay true); unknown GPS gives
+        # 0, the vacuously true floor.
         state: >
-          {% set travel = states('sensor.your_travel_time_home') | float(0) %}
-          {% if travel > 0 %}
-            {{ (travel / 5) | round(0, 'floor') * 5 }}
+          {% set modes = [states('sensor.your_travel_time_home') | float(0),
+                          states('sensor.your_transit_time_home') | float(0)]
+                         | select('>', 0) | list %}
+          {% if modes %}
+            {{ (modes | min / 5) | round(0, 'floor') * 5 }}
           {% else %}
             {{ (distance('zone.home', 'person.you') | float(0)
                 * 60 / 100 / 5) | round(0, 'floor') * 5 }}
@@ -155,11 +301,10 @@ template:
         unique_id: homeostat_return_eta
         unit_of_measurement: min
         state_class: measurement
-        # a CREDIBLE estimate; 0 = none. Confirmed heading home means
-        # "worst case, home in floor minutes". Rounding to 5 min is the
-        # hysteresis that keeps nav jitter from flapping decisions, and
-        # since now()-templates re-render every minute, time-based bucket
-        # changes reach the daemon as ordinary state changes.
+        # 0 = no estimate. Confirmed heading home = "worst case, home in
+        # floor minutes", so the floor is the estimate; a manual datetime is
+        # the fallback. Rounding to 5 min is the hysteresis that keeps nav
+        # jitter from flapping the daemon's buckets.
         state: >
           {% if is_state('binary_sensor.homeostat_heading_home', 'on') %}
             {{ [states('sensor.homeostat_return_floor') | float(0), 5] | max }}
@@ -168,15 +313,25 @@ template:
             {% set mins = (manual_ts - now().timestamp()) / 60 %}
             {{ ((mins / 5) | round(0, 'ceil') * 5) if mins > 0 else 0 }}
           {% endif %}
+        attributes:
+          source: >
+            {% if is_state('binary_sensor.homeostat_heading_home', 'on') %}
+              heading_home
+            {% elif (state_attr('input_datetime.homeostat_expected_return', 'timestamp') | float(0))
+                    > now().timestamp() %}
+              manual
+            {% else %}
+              none
+            {% endif %}
 
       - name: homeostat_recovery_minutes
         unique_id: homeostat_recovery_minutes
         unit_of_measurement: min
         state_class: measurement
-        # time to reheat the house to livable (19C here) from its current
+        # time to reheat the main zone to livable (19C here) from its current
         # temperature, at your measured rate corrected for outdoor
-        # temperature. This stretches the daemon's returning lead so an
-        # arrival never lands in a cold post-peak house.
+        # temperature. Stretches the daemon's returning lead so an arrival
+        # never lands in a cold post-peak house. Warm house (>= 19C) = 0.
         state: >
           {% set t = state_attr('climate.your_main_hvac', 'current_temperature') | float(19) %}
           {% set t_out = states('sensor.your_outdoor_temperature') | float(0) %}
@@ -186,8 +341,12 @@ template:
 
       - name: homeostat_energy_period
         unique_id: homeostat_energy_period
+        # peak sources OR'ed (conservative: a false shed costs comfort, a
+        # missed peak costs money). A manual force is handy for out-of-season
+        # drills.
         state: >
-          {% if is_state('binary_sensor.homeostat_grid_peak_now', 'on') %}
+          {% if is_state('binary_sensor.homeostat_grid_peak_now', 'on')
+                or is_state('input_boolean.homeostat_force_peak', 'on') %}
             peak
           {% elif is_state('binary_sensor.homeostat_grid_preheat_now', 'on') %}
             preheat
@@ -200,7 +359,13 @@ template:
         # what the day demands of the main zone, from the outdoor forecast:
         # off (no conditioning) strictly between the thresholds, cool above,
         # heat below. Circulation on off days is the daemon's output-side
-        # decision (desired_fan_mode), not an input value.
+        # decision (desired_fan_mode), not an input value. The drill knob
+        # wins when set.
         state: >
-          {% set t = states('sensor.your_forecast_high') | float(20) %}
-          {% if t >= 25 %}cool{% elif t <= 16 %}heat{% else %}off{% endif %}
+          {% set forced = states('input_select.homeostat_main_mode_override') %}
+          {% if forced in ['heat', 'cool', 'off'] %}
+            {{ forced }}
+          {% else %}
+            {% set t = states('sensor.your_forecast_high') | float(20) %}
+            {% if t >= 25 %}cool{% elif t <= 16 %}heat{% else %}off{% endif %}
+          {% endif %}
