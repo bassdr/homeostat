@@ -14,8 +14,12 @@ pub const ENTITY_AUX_ZONE_OCCUPIED: &str = "binary_sensor.homeostat_aux_zone_occ
 // matrix decision and the held value lives in HA only, as a record.
 pub const ENTITY_RETURN_ETA: &str = "sensor.homeostat_return_eta";
 pub const ENTITY_RETURN_FLOOR: &str = "sensor.homeostat_return_floor";
-pub const ENTITY_BACK_DURING_RECOVERY: &str = "binary_sensor.homeostat_back_during_recovery";
 pub const ENTITY_RECOVERY_MINUTES: &str = "sensor.homeostat_recovery_minutes";
+// Minutes from now until the recovery horizon (grid peak end + the recovery
+// window). Perception does the clock conversion (like return_eta); the daemon
+// owns the "is someone back before then" policy - see `back_during_recovery`.
+// 0 = no grid event announced.
+pub const ENTITY_RECOVERY_HORIZON: &str = "sensor.homeostat_recovery_horizon_minutes";
 
 /// What the occupancy sensor now publishes: presence facts only. The
 /// away_returning/away_far distinction moved out of perception - it is
@@ -113,6 +117,28 @@ impl Occupancy {
     }
 }
 
+/// Will someone be home during the grid event or before the house recovers
+/// on its own afterwards? Gates the away preheat boost (see decide.rs): true
+/// = normal preheat, false = bare preheat and let the peak fall deep.
+///
+/// Perception provides the horizon as minutes-from-now (grid peak end + the
+/// recovery window; 0 = no event); this applies the policy against the same
+/// return estimates that drive occupancy:
+/// - `horizon_min <= 0`: no event -> trivially back (comfort-safe default).
+/// - the credible estimate (`eta`, when > 0) landing past the horizon proves
+///   an estimated absence.
+/// - the physical floor landing past the horizon proves an absence outright.
+///
+/// Back = neither absence holds.
+pub fn back_during_recovery(horizon_min: f64, return_eta_min: f64, return_floor_min: f64) -> bool {
+    if horizon_min <= 0.0 {
+        return true;
+    }
+    let absent_estimated = return_eta_min > 0.0 && return_eta_min >= horizon_min;
+    let absent_proven = return_floor_min >= horizon_min;
+    !(absent_estimated || absent_proven)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EnergyPeriod {
     Normal,
@@ -170,10 +196,10 @@ pub struct Inputs {
     /// What the day demands of the main zone (from the outdoor forecast).
     pub main_mode: HvacMode,
     pub aux_zone_occupied: bool,
-    /// Someone is expected home during the grid event or within the
-    /// recovery horizon after it ends. Unknown = true: the comfort-safe
-    /// default is a normal preheat; the bare-preheat saving needs positive
-    /// evidence of absence (calendar/manual estimate, or a huge floor).
+    /// Someone is expected home during the grid event or within the recovery
+    /// horizon after it ends (computed by `back_during_recovery`). Gates the
+    /// away preheat boost; the no-event / no-estimate default is true (a
+    /// normal preheat, the comfort-safe direction).
     pub back_during_recovery: bool,
 }
 
@@ -191,9 +217,7 @@ pub struct RawInputs {
     return_eta_min: f64,
     return_floor_min: f64,
     recovery_min: f64,
-    /// Optional with an asymmetric default: unknown means "assume someone
-    /// will be back" (normal preheat, the comfort-safe direction).
-    back_during_recovery: Option<bool>,
+    recovery_horizon_min: f64,
 }
 
 impl RawInputs {
@@ -215,14 +239,7 @@ impl RawInputs {
             ENTITY_RETURN_ETA => Self::set_f64(&mut self.return_eta_min, state),
             ENTITY_RETURN_FLOOR => Self::set_f64(&mut self.return_floor_min, state),
             ENTITY_RECOVERY_MINUTES => Self::set_f64(&mut self.recovery_min, state),
-            ENTITY_BACK_DURING_RECOVERY => Self::set(
-                &mut self.back_during_recovery,
-                match state {
-                    "on" => Some(true),
-                    "off" => Some(false),
-                    _ => None,
-                },
-            ),
+            ENTITY_RECOVERY_HORIZON => Self::set_f64(&mut self.recovery_horizon_min, state),
             _ => false,
         }
     }
@@ -257,7 +274,11 @@ impl RawInputs {
             energy_period: self.energy_period?,
             main_mode: self.main_mode?,
             aux_zone_occupied: self.aux_zone_occupied?,
-            back_during_recovery: self.back_during_recovery.unwrap_or(true),
+            back_during_recovery: back_during_recovery(
+                self.recovery_horizon_min,
+                self.return_eta_min,
+                self.return_floor_min,
+            ),
         })
     }
 }
@@ -368,21 +389,39 @@ mod tests {
     }
 
     #[test]
-    fn unknown_back_during_recovery_defaults_to_assuming_a_return() {
+    fn back_during_recovery_gates_on_the_horizon() {
+        // no grid event (or the horizon input missing -> 0) is trivially
+        // back: the comfort-safe normal preheat
+        assert!(back_during_recovery(0.0, 0.0, 0.0));
+        assert!(back_during_recovery(0.0, 300.0, 300.0));
+
+        // horizon 180 min out. An estimate landing before it = back;
+        // a credible estimate past it = absent (bare preheat).
+        assert!(back_during_recovery(180.0, 60.0, 0.0));
+        assert!(!back_during_recovery(180.0, 240.0, 0.0));
+
+        // no estimate (eta 0) never proves an estimated absence, but the
+        // physical floor past the horizon proves it outright
+        assert!(back_during_recovery(180.0, 0.0, 60.0));
+        assert!(!back_during_recovery(180.0, 0.0, 200.0));
+
+        // boundary: arrival exactly at the horizon counts as absent
+        assert!(!back_during_recovery(180.0, 180.0, 0.0));
+    }
+
+    #[test]
+    fn missing_horizon_input_defaults_to_normal_preheat() {
         let mut raw = RawInputs::default();
         raw.ingest(ENTITY_OCCUPANCY, "away");
         raw.ingest(ENTITY_ENERGY_PERIOD, "preheat");
         raw.ingest(ENTITY_MAIN_MODE, "heat");
         raw.ingest(ENTITY_AUX_ZONE_OCCUPIED, "off");
-        let inputs = raw.complete().unwrap();
-        assert!(
-            inputs.back_during_recovery,
-            "unknown must fail toward the comfort-safe normal preheat"
-        );
-
-        raw.ingest(ENTITY_BACK_DURING_RECOVERY, "off");
-        assert!(!raw.complete().unwrap().back_during_recovery);
-        raw.ingest(ENTITY_BACK_DURING_RECOVERY, "unavailable");
+        // the horizon sensor never arrived (0) -> comfort-safe normal preheat
         assert!(raw.complete().unwrap().back_during_recovery);
+
+        // a real horizon that the floor overshoots -> provably absent
+        raw.ingest(ENTITY_RETURN_FLOOR, "240");
+        raw.ingest(ENTITY_RECOVERY_HORIZON, "180");
+        assert!(!raw.complete().unwrap().back_during_recovery);
     }
 }

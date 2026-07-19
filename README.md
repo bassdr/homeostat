@@ -53,7 +53,7 @@ with dummy source names is in
 | `sensor.homeostat_return_eta` | minutes, `0` = no estimate | credible time-until-someone-is-home (nav, calendar, manual) |
 | `sensor.homeostat_return_floor` | minutes, `0` = vacuous | earliest *possible* arrival (travel time / distance) — a lower bound, always true |
 | `sensor.homeostat_recovery_minutes` | minutes, `0` = warm enough | time to reheat the house to livable from its current temperature |
-| `binary_sensor.homeostat_back_during_recovery` | `on`/`off` | someone expected home during the peak or soon after; gates the away preheat boost |
+| `sensor.homeostat_recovery_horizon_minutes` | minutes, `0` = no grid event | minutes from now until the grid peak ends plus your recovery window; the daemon compares the return estimates against it to gate the away preheat boost |
 
 Conventions: `0` means "none/unknown" on the numeric optionals; a required
 input going `unknown`/`unavailable` *suspends* decisions (the daemon holds

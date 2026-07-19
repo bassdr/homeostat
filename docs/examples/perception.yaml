@@ -18,7 +18,7 @@
 #   sensor.homeostat_return_eta         minutes; 0 = no estimate
 #   sensor.homeostat_return_floor       minutes; 0 = vacuous
 #   sensor.homeostat_recovery_minutes   minutes; 0 = warm enough
-#   binary_sensor.homeostat_back_during_recovery
+#   sensor.homeostat_recovery_horizon_minutes  minutes; 0 = no grid event
 # Everything else below is intermediate plumbing that computes those.
 # =============================================================================
 
@@ -66,7 +66,7 @@ input_number:
   homeostat_recovery_hours:
     name: Recovery horizon
     # worst-case hours for the house to reheat itself to livable after a
-    # fully-shed peak; gates the away preheat boost (back_during_recovery)
+    # fully-shed peak; feeds the recovery horizon that gates the preheat boost
     min: 0
     max: 12
     step: 0.5
@@ -213,26 +213,6 @@ template:
           {{ is_state('binary_sensor.homeostat_approaching_home', 'on')
              or is_state('device_tracker.your_car_route', 'home') }}
 
-      - name: homeostat_back_during_recovery
-        unique_id: homeostat_back_during_recovery
-        # the preheat boost only pays if someone is home during the peak or
-        # before the house has recovered on its own afterwards. Unknown = on,
-        # the comfort-safe default; skipping the boost requires positive
-        # evidence of absence (an estimate past the horizon, or a floor that
-        # proves it - the floor is a guaranteed minimum absence).
-        state: >
-          {% set peak_end = states('sensor.homeostat_grid_peak_end') | as_datetime(none) %}
-          {% if peak_end is none %}
-            true
-          {% else %}
-            {% set horizon = peak_end + timedelta(hours=states('input_number.homeostat_recovery_hours') | float(5)) %}
-            {% set eta = states('sensor.homeostat_return_eta') | float(0) %}
-            {% set floor = states('sensor.homeostat_return_floor') | float(0) %}
-            {% set absent_estimated = eta > 0 and now() + timedelta(minutes=eta) >= horizon %}
-            {% set absent_proven = now() + timedelta(minutes=floor) >= horizon %}
-            {{ not (absent_estimated or absent_proven) }}
-          {% endif %}
-
   - sensor:
       - name: homeostat_grid_peak_end
         unique_id: homeostat_grid_peak_end
@@ -240,6 +220,23 @@ template:
         # same provider isolation as the grid_* binary sensors
         availability: "{{ has_value('sensor.your_utility_next_peak_end') }}"
         state: "{{ states('sensor.your_utility_next_peak_end') }}"
+
+      - name: homeostat_recovery_horizon_minutes
+        unique_id: homeostat_recovery_horizon_minutes
+        unit_of_measurement: min
+        # minutes from now until the peak ends plus your recovery window;
+        # 0 = no grid event. Perception does the clock + recovery_hours
+        # conversion; the daemon owns the "is someone back before then"
+        # policy and gates the preheat boost on it. now() re-renders every
+        # minute, so the daemon stays clockless.
+        state: >
+          {% set peak_end = states('sensor.homeostat_grid_peak_end') | as_datetime(none) %}
+          {% if peak_end is none %}
+            0
+          {% else %}
+            {% set horizon = peak_end + timedelta(hours=states('input_number.homeostat_recovery_hours') | float(5)) %}
+            {{ [(horizon - now()).total_seconds() / 60, 0] | max | round(0) }}
+          {% endif %}
 
       - name: homeostat_occupancy
         unique_id: homeostat_occupancy
