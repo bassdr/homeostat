@@ -54,11 +54,13 @@ with dummy source names is in
 | `sensor.homeostat_return_floor` | minutes, `0` = vacuous | earliest *possible* arrival (travel time / distance) — a lower bound, always true |
 | `sensor.homeostat_recovery_minutes` | minutes, `0` = warm enough | time to reheat the house to livable from its current temperature |
 | `sensor.homeostat_recovery_horizon_minutes` | minutes, `0` = no grid event | minutes from now until the grid peak ends plus your recovery window; the daemon compares the return estimates against it to gate the away preheat boost |
+| `binary_sensor.homeostat_slept_away` | `on`/`off` | nobody was home overnight (latch at deep night, clear on arrival). With no return evidence the daemon assumes nobody shows up during a grid event — this is what makes a morning peak skippable while an evening peak still preheats, without giving the daemon a wall clock |
 
 Conventions: `0` means "none/unknown" on the numeric optionals; a required
 input going `unknown`/`unavailable` *suspends* decisions (the daemon holds
-its last output rather than acting on garbage). The four return/recovery
-inputs are optional — without them you simply get plain `away` behavior.
+its last output rather than acting on garbage). The return/recovery inputs
+and `slept_away` are optional — without them you simply get plain `away`
+behavior and the in-doubt preheat boost.
 
 Manual overrides are **not** a daemon input. When someone adjusts a
 thermostat by hand, that is handled entirely on the HA side: a wire stops

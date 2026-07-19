@@ -1,5 +1,25 @@
 # Changelog
 
+## Unreleased
+
+- **`back_during_recovery` policy moved into the daemon.** Perception now
+  emits `sensor.homeostat_recovery_horizon_minutes` (minutes until peak end
+  + recovery window; a pure clock conversion) and the daemon owns the
+  "is someone back before then" comparison, unit-tested. Replaces the input
+  `binary_sensor.homeostat_back_during_recovery`; a missing horizon reads
+  as 0 = no event = normal preheat, so a version-skewed deploy is benign.
+- **New optional input `binary_sensor.homeostat_slept_away`** (nobody home
+  overnight; latched at deep night, cleared on arrival). With no return
+  evidence the daemon assumes nobody shows up during a grid event — the
+  morning preheat boost is skipped, while an evening peak (slept home, at
+  work) still preheats. Same symmetric rule; the overnight *fact* is what
+  distinguishes morning from evening, not a wall clock. Missing/unknown
+  reads as "slept home", keeping the in-doubt boost.
+- Full-path "returning home" scenario tests (perception minutes → occupancy
+  bucket → setpoint) covering: the 20-min comfort pre-start (heat and cool),
+  the must-preheat evening peak, the provably-absent thrift case, the
+  slept-away morning skip, and its heading-home counter-case.
+
 ## 0.1.0 — first release (2026-07-18)
 
 First tagged, non-prerelease cut. Runs live in exactly one house (the

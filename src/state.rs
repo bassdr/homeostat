@@ -20,6 +20,12 @@ pub const ENTITY_RECOVERY_MINUTES: &str = "sensor.homeostat_recovery_minutes";
 // owns the "is someone back before then" policy - see `back_during_recovery`.
 // 0 = no grid event announced.
 pub const ENTITY_RECOVERY_HORIZON: &str = "sensor.homeostat_recovery_horizon_minutes";
+// Nobody was home overnight and nobody has come home since (perception
+// latches "nobody home at deep night" and clears it on arrival). The fact
+// that makes a morning grid event different from an evening one without
+// giving the daemon a wall clock - see `back_during_recovery`. Optional:
+// missing/unknown reads as off (slept home), the comfort-safe default.
+pub const ENTITY_SLEPT_AWAY: &str = "binary_sensor.homeostat_slept_away";
 
 /// What the occupancy sensor now publishes: presence facts only. The
 /// away_returning/away_far distinction moved out of perception - it is
@@ -128,15 +134,28 @@ impl Occupancy {
 /// - the credible estimate (`eta`, when > 0) landing past the horizon proves
 ///   an estimated absence.
 /// - the physical floor landing past the horizon proves an absence outright.
+/// - `slept_away` with no estimate assumes an absence: nobody who slept
+///   elsewhere starts driving home at 5AM unannounced, so an overnight
+///   absence with zero return evidence means the event window passes empty.
+///   This is what makes a morning event behave differently from an evening
+///   one - the rule is symmetric, the *fact* is not (mornings follow
+///   nights). Any positive eta outranks the assumption: real evidence of
+///   return is compared against the horizon like always.
 ///
-/// Back = neither absence holds.
-pub fn back_during_recovery(horizon_min: f64, return_eta_min: f64, return_floor_min: f64) -> bool {
+/// Back = no absence holds.
+pub fn back_during_recovery(
+    horizon_min: f64,
+    return_eta_min: f64,
+    return_floor_min: f64,
+    slept_away: bool,
+) -> bool {
     if horizon_min <= 0.0 {
         return true;
     }
     let absent_estimated = return_eta_min > 0.0 && return_eta_min >= horizon_min;
     let absent_proven = return_floor_min >= horizon_min;
-    !(absent_estimated || absent_proven)
+    let absent_overnight = slept_away && return_eta_min <= 0.0;
+    !(absent_estimated || absent_proven || absent_overnight)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -218,6 +237,10 @@ pub struct RawInputs {
     return_floor_min: f64,
     recovery_min: f64,
     recovery_horizon_min: f64,
+    /// Plain bool for the same reason: optional, and anything but "on"
+    /// (including unknown/unavailable) means "slept home" - the
+    /// comfort-safe default that keeps the in-doubt preheat.
+    slept_away: bool,
 }
 
 impl RawInputs {
@@ -240,6 +263,7 @@ impl RawInputs {
             ENTITY_RETURN_FLOOR => Self::set_f64(&mut self.return_floor_min, state),
             ENTITY_RECOVERY_MINUTES => Self::set_f64(&mut self.recovery_min, state),
             ENTITY_RECOVERY_HORIZON => Self::set_f64(&mut self.recovery_horizon_min, state),
+            ENTITY_SLEPT_AWAY => Self::set_flag(&mut self.slept_away, state),
             _ => false,
         }
     }
@@ -263,6 +287,18 @@ impl RawInputs {
         }
     }
 
+    /// Optional binary input: only "on" is on; unknown/unavailable fall to
+    /// off (the comfort-safe default) instead of suspending.
+    fn set_flag(slot: &mut bool, state: &str) -> bool {
+        let value = state == "on";
+        if *slot == value {
+            false
+        } else {
+            *slot = value;
+            true
+        }
+    }
+
     pub fn complete(&self) -> Option<Inputs> {
         Some(Inputs {
             occupancy: Occupancy::derive(
@@ -278,6 +314,7 @@ impl RawInputs {
                 self.recovery_horizon_min,
                 self.return_eta_min,
                 self.return_floor_min,
+                self.slept_away,
             ),
         })
     }
@@ -392,21 +429,41 @@ mod tests {
     fn back_during_recovery_gates_on_the_horizon() {
         // no grid event (or the horizon input missing -> 0) is trivially
         // back: the comfort-safe normal preheat
-        assert!(back_during_recovery(0.0, 0.0, 0.0));
-        assert!(back_during_recovery(0.0, 300.0, 300.0));
+        assert!(back_during_recovery(0.0, 0.0, 0.0, false));
+        assert!(back_during_recovery(0.0, 300.0, 300.0, false));
 
         // horizon 180 min out. An estimate landing before it = back;
         // a credible estimate past it = absent (bare preheat).
-        assert!(back_during_recovery(180.0, 60.0, 0.0));
-        assert!(!back_during_recovery(180.0, 240.0, 0.0));
+        assert!(back_during_recovery(180.0, 60.0, 0.0, false));
+        assert!(!back_during_recovery(180.0, 240.0, 0.0, false));
 
         // no estimate (eta 0) never proves an estimated absence, but the
         // physical floor past the horizon proves it outright
-        assert!(back_during_recovery(180.0, 0.0, 60.0));
-        assert!(!back_during_recovery(180.0, 0.0, 200.0));
+        assert!(back_during_recovery(180.0, 0.0, 60.0, false));
+        assert!(!back_during_recovery(180.0, 0.0, 200.0, false));
 
         // boundary: arrival exactly at the horizon counts as absent
-        assert!(!back_during_recovery(180.0, 180.0, 0.0));
+        assert!(!back_during_recovery(180.0, 180.0, 0.0, false));
+    }
+
+    #[test]
+    fn overnight_absence_without_return_evidence_is_assumed_absent() {
+        // slept away, no estimate: nobody starts driving home at 5AM
+        // unannounced - assume the event window passes empty, even though
+        // the physical floor alone (60 < 180) proves nothing
+        assert!(!back_during_recovery(180.0, 0.0, 60.0, true));
+        assert!(!back_during_recovery(180.0, 0.0, 0.0, true));
+
+        // any positive eta outranks the assumption: real return evidence
+        // is compared against the horizon like always
+        assert!(back_during_recovery(180.0, 60.0, 60.0, true));
+        assert!(!back_during_recovery(180.0, 240.0, 240.0, true));
+
+        // no grid event: the flag is irrelevant
+        assert!(back_during_recovery(0.0, 0.0, 0.0, true));
+
+        // slept home (or the input missing): the in-doubt preheat stands
+        assert!(back_during_recovery(180.0, 0.0, 60.0, false));
     }
 
     #[test]
