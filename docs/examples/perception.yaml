@@ -19,6 +19,7 @@
 #   sensor.homeostat_return_floor       minutes; 0 = vacuous
 #   sensor.homeostat_recovery_minutes   minutes; 0 = warm enough
 #   sensor.homeostat_recovery_horizon_minutes  minutes; 0 = no grid event
+#   binary_sensor.homeostat_slept_away  on = nobody was home overnight
 # Everything else below is intermediate plumbing that computes those.
 # =============================================================================
 
@@ -212,6 +213,31 @@ template:
         state: >
           {{ is_state('binary_sensor.homeostat_approaching_home', 'on')
              or is_state('device_tracker.your_car_route', 'home') }}
+
+  # Nobody slept home: latched at deep night, cleared on arrival. The fact
+  # that lets the daemon treat a morning grid event differently from an
+  # evening one without a wall clock: an overnight absence with no return
+  # evidence means nobody will show up during the event, so the daemon
+  # skips the away preheat boost. Optional input - omit it and the daemon
+  # simply keeps the in-doubt boost. Trigger-based so it latches (and
+  # restores over restarts) instead of re-deriving.
+  - triggers:
+      - trigger: time
+        at: "03:00:00"
+      - trigger: state
+        entity_id: sensor.homeostat_occupancy
+    binary_sensor:
+      - name: homeostat_slept_away
+        unique_id: homeostat_slept_away
+        state: >
+          {% set occ = states('sensor.homeostat_occupancy') %}
+          {% if occ in ['home', 'home_asleep'] %}
+            off
+          {% elif trigger.platform == 'time' and occ == 'away' %}
+            on
+          {% else %}
+            {{ this.state }}
+          {% endif %}
 
   - sensor:
       - name: homeostat_grid_peak_end

@@ -342,6 +342,102 @@ mod tests {
         assert_eq!(decide(&i).aux_zone_setpoint, AUX_FROST_FLOOR);
     }
 
+    /// Full-path "returning home" scenarios, in David's own vocabulary:
+    /// realistic perception minutes -> occupancy bucket -> setpoint, run
+    /// through `RawInputs::complete` + `decide` (the only tests that exercise
+    /// the whole chain rather than a hand-built `Inputs`). These lock the
+    /// three cases he cares about; where the daemon *cannot* express a
+    /// distinction (morning vs evening peak), the comment says so.
+    #[test]
+    fn returning_home_scenarios() {
+        use crate::state::{
+            RawInputs, ENTITY_AUX_ZONE_OCCUPIED, ENTITY_ENERGY_PERIOD, ENTITY_MAIN_MODE,
+            ENTITY_OCCUPANCY, ENTITY_RECOVERY_HORIZON, ENTITY_RECOVERY_MINUTES, ENTITY_RETURN_ETA,
+            ENTITY_RETURN_FLOOR, ENTITY_SLEPT_AWAY,
+        };
+
+        // occupancy, period, mode, return_eta, return_floor, recovery,
+        // recovery_horizon (all minutes), slept_away -> the decided Inputs
+        #[allow(clippy::too_many_arguments)]
+        fn perceive(
+            occ: &str,
+            period: &str,
+            mode: &str,
+            eta: f64,
+            floor: f64,
+            recovery: f64,
+            horizon: f64,
+            slept_away: &str,
+        ) -> Inputs {
+            let mut raw = RawInputs::default();
+            raw.ingest(ENTITY_OCCUPANCY, occ);
+            raw.ingest(ENTITY_ENERGY_PERIOD, period);
+            raw.ingest(ENTITY_MAIN_MODE, mode);
+            raw.ingest(ENTITY_AUX_ZONE_OCCUPIED, "off");
+            raw.ingest(ENTITY_RETURN_ETA, &eta.to_string());
+            raw.ingest(ENTITY_RETURN_FLOOR, &floor.to_string());
+            raw.ingest(ENTITY_RECOVERY_MINUTES, &recovery.to_string());
+            raw.ingest(ENTITY_RECOVERY_HORIZON, &horizon.to_string());
+            raw.ingest(ENTITY_SLEPT_AWAY, slept_away);
+            raw.complete().expect("optional inputs never suspend")
+        }
+
+        // Case 1 - Winter, heading home, NO peak. Heading home 20 min out
+        // (return_eta = floor = 20), warm baseline (recovery 0), no grid
+        // event (horizon 0). The 20-min comfort pre-start: returning gets the
+        // full home target early, not the away setback.
+        let i = perceive("away", "normal", "heat", 20.0, 20.0, 0.0, 0.0, "off");
+        assert_eq!(i.occupancy, Occupancy::AwayReturning);
+        assert_eq!(decide(&i).main_setpoint, 22.5, "winter returning, no peak");
+
+        // Case 3 - Summer, heading home. Same 20-min lead, cool day. The
+        // house should be AT comfort on arrival (25), never the deep 28
+        // away setback. (Previously only guarded by the >=20 cool sweep.)
+        let i = perceive("away", "normal", "cool", 20.0, 20.0, 0.0, 0.0, "off");
+        assert_eq!(i.occupancy, Occupancy::AwayReturning);
+        let d = decide(&i);
+        assert_eq!(d.main_mode, HvacMode::Cool);
+        assert_eq!(d.main_setpoint, 25.0, "summer returning = comfort early");
+
+        // Case 2, EVENING peak - the must-preheat one. At work, ~45 min out,
+        // slept home last night; the recovery horizon (peak end + window) is
+        // hours away, so someone is credibly back before the house recovers
+        // -> boost the preheat. This is the scenario whose failure mode is
+        // "cold for a very long time".
+        let i = perceive("away", "preheat", "heat", 45.0, 45.0, 0.0, 540.0, "off");
+        assert!(i.back_during_recovery, "back before horizon -> boost");
+        assert_eq!(decide(&i).main_setpoint, 23.0, "evening peak preheats");
+
+        // Case 2, thrift end - PROVABLY absent past the horizon. Genuinely
+        // far (floor 240) with the horizon only 180 out: no one can be back
+        // before the house recovers, so drop the boost and let the peak fall.
+        let i = perceive("away", "preheat", "heat", 0.0, 240.0, 0.0, 180.0, "off");
+        assert!(!i.back_during_recovery, "provably absent -> no boost");
+        assert_eq!(i.occupancy, Occupancy::AwayFar);
+        assert_eq!(decide(&i).main_setpoint, 17.0, "bare preheat, far & absent");
+
+        // Case 2, MORNING peak, slept ~2h away, no nav (eta 0, floor 120).
+        // Nobody starts driving home at 5AM unannounced: the overnight
+        // absence with zero return evidence reads as "not back during the
+        // event", so the morning preheat is skipped - hold the far setback.
+        // Same symmetric rule as the evening; the slept_away FACT (mornings
+        // follow nights) is what distinguishes them, not a wall clock.
+        let i = perceive("away", "preheat", "heat", 0.0, 120.0, 0.0, 540.0, "on");
+        assert!(!i.back_during_recovery, "slept away, no evidence -> skip");
+        assert_eq!(i.occupancy, Occupancy::AwayFar);
+        assert_eq!(decide(&i).main_setpoint, 17.0, "morning slept-away skips");
+
+        // Case 2, morning counter-case: slept away but ACTUALLY heading
+        // home (nav estimate 60 min, well inside the horizon). Real return
+        // evidence outranks the overnight assumption - preheat resumes.
+        let i = perceive("away", "preheat", "heat", 60.0, 60.0, 0.0, 540.0, "on");
+        assert!(
+            i.back_during_recovery,
+            "evidence of return beats slept_away"
+        );
+        assert_eq!(decide(&i).main_setpoint, 23.0, "driving home = boost");
+    }
+
     /// Without heat demand the aux zone (basement baseboards) holds
     /// exactly the frost floor: no comfort heating (caught in shadow on an
     /// off day - the old (_, Normal) arm armed the basement at 16C in
