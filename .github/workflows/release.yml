@@ -36,6 +36,8 @@ jobs:
           files: homeostat-${{ matrix.target }}.tar.gz
           # semver convention: a hyphen in the tag (v0.2.0-rc1) = pre-release
           prerelease: ${{ contains(github.ref_name, '-') }}
+          # auto-populate the release body so it is never blank
+          generate_release_notes: true
 
   docker:
     # assembles multi-arch images from the prebuilt static binaries -
