@@ -1,16 +1,347 @@
 # =============================================================================
-# Actuation wires - EXAMPLE with dummy devices
+# Actuation + override/resume - EXAMPLE with dummy devices
 # =============================================================================
-# Dumb single-writer forwarders: no decision logic, no conditions except the
-# homeostat_enabled gate, exactly one automation writes each device. Replace
-# every `your_*` entity with your hardware.
+# Replace every `your_*` entity with your hardware. Two families of
+# automation:
+#   WIRES     - dumb single-writer forwarders: they push the daemon's
+#               published decision to the devices. No decision logic, one
+#               writer per device, gated by input_boolean.homeostat_enabled
+#               and (for holds) by the per-zone override boolean.
+#   OVERRIDE  - one automation per zone that turns a manual thermostat change
+#               into an override (the wire stands down) and a manual "off"
+#               into a resume.
 #
-# THE rule: the main zone's mode is written before its setpoint, always
-# together, from this one automation. A setpoint landing on a stale mode is
-# how houses get cooled to 19C all afternoon.
+# THE rule for the main wire: write the mode BEFORE the setpoint, always
+# both, from this one automation. A setpoint landing on a stale mode is how
+# a house gets cooled to 19C all afternoon.
 # =============================================================================
 
 automation:
+  # ---------------------------------------------------------------
+  # Watchdog + leaving reset
+  # ---------------------------------------------------------------
+  # Dead-man alert: the daemon's MQTT last-will flips its entities
+  # unavailable the moment it dies; alert if that lasts.
+  - id: homeostat_daemon_watchdog
+    alias: "Homeostat: daemon watchdog"
+    triggers:
+      - trigger: state
+        entity_id: binary_sensor.homeostat_daemon_alive
+        to: "off"
+        for:
+          minutes: 10
+    actions:
+      - action: notify.your_phone
+        data:
+          title: homeostat is down
+          message: >
+            The homeostat daemon has been unreachable for 10 minutes.
+            Thermostats keep their last setpoints.
+    mode: single
+
+  # An empty house wants no hold. Clear both holds and both overrides on
+  # leaving; clearing the overrides re-triggers the wires, which re-sync the
+  # devices to the matrix.
+  - id: homeostat_reset_on_leaving
+    alias: "Homeostat: reset holds and overrides when leaving"
+    triggers:
+      - trigger: state
+        entity_id: sensor.homeostat_occupancy
+        to: away
+    actions:
+      - action: input_number.set_value
+        target:
+          entity_id:
+            - input_number.homeostat_comfort_setpoint
+            - input_number.homeostat_aux_comfort_setpoint
+        data:
+          value: 0
+      - action: input_boolean.turn_off
+        target:
+          entity_id:
+            - input_boolean.homeostat_main_override
+            - input_boolean.homeostat_aux_override
+    mode: single
+
+  # ---------------------------------------------------------------
+  # Override exceptions: notify the human, never revert.
+  # ---------------------------------------------------------------
+  - id: homeostat_override_during_peak
+    alias: "Homeostat: manual override during a grid peak"
+    triggers:
+      - trigger: state
+        entity_id: sensor.homeostat_energy_period
+        to: peak
+      - trigger: state
+        entity_id:
+          - input_boolean.homeostat_main_override
+          - input_boolean.homeostat_aux_override
+        to: "on"
+    conditions:
+      - condition: state
+        entity_id: sensor.homeostat_energy_period
+        state: peak
+      - condition: or
+        conditions:
+          - condition: state
+            entity_id: input_boolean.homeostat_main_override
+            state: "on"
+          - condition: state
+            entity_id: input_boolean.homeostat_aux_override
+            state: "on"
+    actions:
+      - action: notify.your_phone
+        data:
+          title: Manual setpoint during a grid peak
+          message: >
+            A manual setpoint is active during a demand-response peak.
+            Comfort wins, but it costs - clear the override on the dashboard
+            to let homeostat shed the load.
+    mode: single
+
+  # Heating one zone while cooling another - possibly a deliberate
+  # dehumidifying trick, possibly a mistake. Ask, do not act.
+  - id: homeostat_heat_cool_conflict
+    alias: "Homeostat: aux heating while the main zone cools"
+    triggers:
+      - trigger: state
+        entity_id: climate.your_main_hvac
+        attribute: hvac_action
+        to: cooling
+        for: "00:10:00"
+      - trigger: state
+        entity_id:
+          - climate.your_aux_thermostat_1
+          - climate.your_aux_thermostat_2
+        attribute: hvac_action
+        to: heating
+        for: "00:10:00"
+    conditions:
+      - condition: state
+        entity_id: climate.your_main_hvac
+        attribute: hvac_action
+        state: cooling
+      - condition: template
+        value_template: >
+          {{ [states.climate.your_aux_thermostat_1,
+              states.climate.your_aux_thermostat_2]
+             | selectattr('attributes.hvac_action', 'eq', 'heating')
+             | list | count > 0 }}
+    actions:
+      - action: notify.your_phone
+        data:
+          title: Heating and cooling at once
+          message: >
+            The aux zone is heating while the main zone cools. Intentional
+            (a dehumidifying trick)? Otherwise check the overrides -
+            homeostat forces nothing while a manual setpoint is detected.
+    mode: single
+
+  # ---------------------------------------------------------------
+  # Override / resume - one automation per zone.
+  #   OVERRIDE = the device disagrees with what homeostat wants (a different
+  #     mode, or a different setpoint). The wire then stands down and the
+  #     human's configuration persists in the device.
+  #   RESUME = while overriding, cross the off boundary: conditioning -> off,
+  #     or force-off -> any conditioning mode. (A thermostat with no auto
+  #     mode has no other "hand it back" gesture; off does double duty.)
+  # Choose order (resume, then mode-override, then setpoint-override) makes
+  # the branches mutually exclusive - no inter-automation races. The wire
+  # always writes to_state == desired, so its own writes never look like a
+  # disagreement. Only while live and home.
+  # ---------------------------------------------------------------
+  - id: homeostat_override_main
+    alias: "Homeostat: main zone override / resume"
+    # single heat/cool mode exposes `temperature`; a manual heat_cool range
+    # mode exposes target_temp_low/high - watch all three plus the mode.
+    triggers:
+      - trigger: state
+        entity_id: climate.your_main_hvac
+        id: mode
+      - trigger: state
+        entity_id: climate.your_main_hvac
+        attribute: temperature
+        id: single
+      - trigger: state
+        entity_id: climate.your_main_hvac
+        attribute: target_temp_low
+        id: range_low
+      - trigger: state
+        entity_id: climate.your_main_hvac
+        attribute: target_temp_high
+        id: range_high
+    conditions:
+      - condition: state
+        entity_id: input_boolean.homeostat_enabled
+        state: "on"
+      - condition: template
+        value_template: >
+          {{ states('sensor.homeostat_occupancy') in ['home', 'home_asleep'] }}
+      - condition: template
+        value_template: >
+          {{ trigger.from_state is not none
+             and trigger.from_state.state not in ['unavailable', 'unknown']
+             and trigger.to_state.state not in ['unavailable', 'unknown'] }}
+    actions:
+      - choose:
+          # RESUME: a mode change crossing the off boundary while overriding
+          - conditions:
+              - "{{ trigger.id == 'mode' }}"
+              - condition: state
+                entity_id: input_boolean.homeostat_main_override
+                state: "on"
+              - condition: template
+                value_template: >
+                  {{ (trigger.from_state.state == 'off')
+                     != (trigger.to_state.state == 'off') }}
+            sequence:
+              - action: input_number.set_value
+                target: { entity_id: input_number.homeostat_comfort_setpoint }
+                data: { value: 0 }
+              # turning the override off re-triggers the wire -> re-sync
+              - action: input_boolean.turn_off
+                target: { entity_id: input_boolean.homeostat_main_override }
+          # OVERRIDE by mode: homeostat was driving and the device mode now
+          # differs from desired (a conditioning pick, or a force-off). Also
+          # record the setpoint the human picked, so the hold is visible and
+          # feeds the tuning collector.
+          - conditions:
+              - "{{ trigger.id == 'mode' }}"
+              - condition: state
+                entity_id: input_boolean.homeostat_main_override
+                state: "off"
+              - condition: template
+                value_template: >
+                  {{ trigger.to_state.state
+                     != state_attr('sensor.homeostat_desired', 'main_mode') }}
+            sequence:
+              - action: input_boolean.turn_on
+                target: { entity_id: input_boolean.homeostat_main_override }
+              - variables:
+                  a: "{{ trigger.to_state.attributes }}"
+                  m: "{{ trigger.to_state.state }}"
+                  picked: >
+                    {{ (a.temperature if a.temperature is defined and a.temperature
+                        else (a.target_temp_high if m == 'cool'
+                        else (a.target_temp_low if m == 'heat' else 0))) | float(0) }}
+                  desired: "{{ states('sensor.homeostat_desired_main_setpoint') | float(-99) }}"
+              - if:
+                  - "{{ picked > 0 and (picked - desired) | abs > 0.25 }}"
+                then:
+                  - action: input_number.set_value
+                    target: { entity_id: input_number.homeostat_comfort_setpoint }
+                    data: { value: "{{ [picked, 29] | min }}" }
+          # OVERRIDE by setpoint: a real setpoint change (from_state guards
+          # against the artifact of a mode leaving off) that differs from
+          # desired. Target follows demand: heat -> low, cool -> high.
+          - conditions:
+              - "{{ trigger.id in ['single', 'range_low', 'range_high'] }}"
+              - "{{ trigger.from_state.state != 'off' }}"
+              - condition: template
+                value_template: >
+                  {% set demand = states('sensor.homeostat_main_mode') %}
+                  {% set a = trigger.to_state.attributes %}
+                  {% set new = a.temperature if trigger.id == 'single'
+                     else (a.target_temp_low if trigger.id == 'range_low' and demand != 'cool'
+                     else (a.target_temp_high if trigger.id == 'range_high' and demand != 'heat'
+                     else none)) %}
+                  {% set desired = states('sensor.homeostat_desired_main_setpoint') | float(-99) %}
+                  {{ new is not none and new | float(0) > 0
+                     and (new | float(0) - desired) | abs > 0.25 }}
+            sequence:
+              - action: input_number.set_value
+                target: { entity_id: input_number.homeostat_comfort_setpoint }
+                data:
+                  value: >
+                    {% set a = trigger.to_state.attributes %}
+                    {% set new = a.temperature if trigger.id == 'single'
+                       else (a.target_temp_low if trigger.id == 'range_low'
+                       else a.target_temp_high) %}
+                    {{ [new | float(0), 29] | min }}
+              - action: input_boolean.turn_on
+                target: { entity_id: input_boolean.homeostat_main_override }
+    mode: queued
+    max: 5
+
+  # Aux zone, same model. Modes are heat/off only and the wire always turns
+  # the zone ON, so desired mode is effectively heat and any off is the
+  # human's. Any one thermostat drives the whole zone.
+  - id: homeostat_override_aux
+    alias: "Homeostat: aux zone override / resume"
+    triggers:
+      - trigger: state
+        entity_id:
+          - climate.your_aux_thermostat_1
+          - climate.your_aux_thermostat_2
+        id: mode
+      - trigger: state
+        entity_id:
+          - climate.your_aux_thermostat_1
+          - climate.your_aux_thermostat_2
+        attribute: temperature
+        id: setpoint
+    conditions:
+      - condition: state
+        entity_id: input_boolean.homeostat_enabled
+        state: "on"
+      - condition: template
+        value_template: >
+          {{ states('sensor.homeostat_occupancy') in ['home', 'home_asleep'] }}
+      - condition: template
+        value_template: >
+          {{ trigger.from_state is not none
+             and trigger.from_state.state not in ['unavailable', 'unknown']
+             and trigger.to_state.state not in ['unavailable', 'unknown'] }}
+    actions:
+      - choose:
+          # RESUME: mode crossed the off boundary while overriding
+          - conditions:
+              - "{{ trigger.id == 'mode' }}"
+              - condition: state
+                entity_id: input_boolean.homeostat_aux_override
+                state: "on"
+              - condition: template
+                value_template: >
+                  {{ (trigger.from_state.state == 'off')
+                     != (trigger.to_state.state == 'off') }}
+            sequence:
+              - action: input_number.set_value
+                target: { entity_id: input_number.homeostat_aux_comfort_setpoint }
+                data: { value: 0 }
+              - action: input_boolean.turn_off
+                target: { entity_id: input_boolean.homeostat_aux_override }
+          # OVERRIDE by mode: driving and the zone is now off (the wire only
+          # ever heats, so off always disagrees)
+          - conditions:
+              - "{{ trigger.id == 'mode' }}"
+              - condition: state
+                entity_id: input_boolean.homeostat_aux_override
+                state: "off"
+              - "{{ trigger.to_state.state == 'off' }}"
+            sequence:
+              - action: input_boolean.turn_on
+                target: { entity_id: input_boolean.homeostat_aux_override }
+          # OVERRIDE by setpoint
+          - conditions:
+              - "{{ trigger.id == 'setpoint' }}"
+              - "{{ trigger.from_state.state != 'off' }}"
+              - condition: template
+                value_template: >
+                  {% set new = trigger.to_state.attributes.temperature | float(0) %}
+                  {% set desired = states('sensor.homeostat_desired_aux_zone_setpoint') | float(-99) %}
+                  {{ new > 0 and (new - desired) | abs > 0.25 }}
+            sequence:
+              - action: input_number.set_value
+                target: { entity_id: input_number.homeostat_aux_comfort_setpoint }
+                data: { value: "{{ [trigger.to_state.attributes.temperature | float(0), 26] | min }}" }
+              - action: input_boolean.turn_on
+                target: { entity_id: input_boolean.homeostat_aux_override }
+    mode: queued
+    max: 5
+
+  # ---------------------------------------------------------------
+  # Wires: forward the published decision to the devices.
+  # ---------------------------------------------------------------
   - id: homeostat_wire_main_zone
     alias: "Homeostat wire: main zone"
     triggers:
@@ -21,6 +352,10 @@ automation:
       - trigger: state
         entity_id: input_boolean.homeostat_enabled
         to: "on"
+      # override cleared -> re-sync the device to the matrix
+      - trigger: state
+        entity_id: input_boolean.homeostat_main_override
+        to: "off"
       - trigger: state
         entity_id: climate.your_main_hvac
         from: unavailable
@@ -30,6 +365,10 @@ automation:
       - condition: state
         entity_id: input_boolean.homeostat_enabled
         state: "on"
+      # the human has the wheel: while overriding, write nothing
+      - condition: state
+        entity_id: input_boolean.homeostat_main_override
+        state: "off"
       - condition: template
         value_template: "{{ has_value('sensor.homeostat_desired') }}"
       - condition: template
@@ -70,22 +409,33 @@ automation:
       - trigger: state
         entity_id: input_boolean.homeostat_enabled
         to: "on"
+      - trigger: state
+        entity_id: input_boolean.homeostat_aux_override
+        to: "off"
+      - trigger: state
+        entity_id:
+          - climate.your_aux_thermostat_1
+          - climate.your_aux_thermostat_2
+        from: unavailable
       - trigger: homeassistant
         event: start
     conditions:
       - condition: state
         entity_id: input_boolean.homeostat_enabled
         state: "on"
+      - condition: state
+        entity_id: input_boolean.homeostat_aux_override
+        state: "off"
       - condition: template
         value_template: "{{ has_value('sensor.homeostat_desired_aux_zone_setpoint') }}"
     actions:
-      # heating zones are never off: the daemon publishes a frost floor
-      # (5C) instead of 0 when the zone has no comfort duty, and the wire
-      # clamps as belt and suspenders - a setpoint persisted in the device
-      # keeps defending the house even if everything upstream dies.
-      # WARNING: this wire assumes HEAT-ONLY aux devices (baseboards). If
-      # your aux zone can cool, a 5C target while it sits in cool mode
-      # would freeze the zone - guard the hvac mode explicitly first.
+      # heating zones are never off: the daemon publishes a frost floor (5C)
+      # instead of 0 when the zone has no comfort duty, and the wire clamps
+      # as belt and suspenders - a setpoint persisted in the device keeps
+      # defending the house even if everything upstream dies.
+      # WARNING: this assumes HEAT-ONLY aux devices (baseboards). If your aux
+      # zone can cool, a 5C target while it sits in cool mode would freeze
+      # the zone - guard the hvac mode explicitly first.
       - variables:
           target: "{{ [states('sensor.homeostat_desired_aux_zone_setpoint') | float(5), 5] | max }}"
       - action: climate.turn_on
@@ -104,14 +454,16 @@ automation:
   - id: homeostat_wire_load_shed
     alias: "Homeostat wire: shed deferrable loads"
     # hang anything you want forced off during grid events on this one flag:
-    # water heater, pool pump, EV charging (or just a warning notification -
-    # never unplug someone's car without asking)
+    # water heater, pool pump, EV charging. Here: the water heater.
     triggers:
       - trigger: state
         entity_id: binary_sensor.homeostat_desired_load_shed
       - trigger: state
         entity_id: input_boolean.homeostat_enabled
         to: "on"
+      - trigger: state
+        entity_id: switch.your_water_heater
+        from: unavailable
       - trigger: homeassistant
         event: start
     conditions:
@@ -136,21 +488,32 @@ automation:
     mode: queued
     max: 5
 
-  # Dead-man switch: the daemon's MQTT last-will flips its entities
-  # unavailable the moment it dies; alert if that lasts.
-  - id: homeostat_daemon_watchdog
-    alias: "Homeostat: daemon watchdog"
+  # Car charging while loads are shed: an actionable notification, never acts
+  # alone (never cut someone's charge without asking). Detects any car on the
+  # local wall connector (not the fleet API); the confirm action stops your
+  # car's charge. Depends on the daemon being alive during the peak - the
+  # watchdog covers that hole.
+  - id: homeostat_charger_peak_warning
+    alias: "Homeostat: car charging while shedding"
     triggers:
       - trigger: state
-        entity_id: sensor.homeostat_desired
-        to: unavailable
-        for:
-          minutes: 10
+        entity_id: binary_sensor.homeostat_desired_load_shed
+        to: "on"
+      - trigger: state
+        entity_id: binary_sensor.your_ev_charger_active
+        to: "on"
+    conditions:
+      - condition: state
+        entity_id: binary_sensor.homeostat_desired_load_shed
+        state: "on"
+      - condition: state
+        entity_id: binary_sensor.your_ev_charger_active
+        state: "on"
     actions:
+      # use your preferred actionable-notification pattern here; the point is
+      # inform-and-confirm, never auto-cut
       - action: notify.your_phone
         data:
-          title: homeostat is down
-          message: >
-            The homeostat daemon has been unreachable for 10 minutes.
-            Thermostats keep their last setpoints.
+          title: Car charging during a peak
+          message: The car is charging during a grid peak.
     mode: single
