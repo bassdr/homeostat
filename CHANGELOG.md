@@ -1,6 +1,12 @@
 # Changelog
 
-## Unreleased
+## 0.2.0 — perception contract change (2026-08-12)
+
+**Upgrading:** deploy the perception package *before* this version. The daemon
+no longer reads `sensor.homeostat_main_mode`; if the new
+`sensor.homeostat_forecast_max_today` is absent it suspends decisions and your
+thermostats hold their last setpoint (visible, safe, and not what you want for
+long).
 
 - **BREAKING — `main_mode` policy moved into the daemon.** Perception no
   longer publishes `sensor.homeostat_main_mode`. It publishes the *fact*
@@ -19,7 +25,6 @@
   `the_dead_band_makes_a_same_day_reversal_unreachable`, which fails in CI if
   the band is narrowed. New `docs/where-policy-lives.md` records the layer
   rule and the incident that motivated writing it down.
-
 - **`back_during_recovery` policy moved into the daemon.** Perception now
   emits `sensor.homeostat_recovery_horizon_minutes` (minutes until peak end
   + recovery window; a pure clock conversion) and the daemon owns the
