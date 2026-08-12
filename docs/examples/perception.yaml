@@ -13,7 +13,9 @@
 # The daemon reads only these entities:
 #   sensor.homeostat_occupancy          home / home_asleep / away
 #   sensor.homeostat_energy_period      normal / preheat / peak
-#   sensor.homeostat_main_mode          heat / cool / off  (what the day demands)
+#   sensor.homeostat_forecast_max_today today's forecast high, C (a fact -
+#                                       the daemon owns the thresholds)
+#   sensor.homeostat_main_mode_override auto / heat / cool / off (drill knob)
 #   binary_sensor.homeostat_aux_zone_occupied
 #   sensor.homeostat_return_eta         minutes; 0 = no estimate
 #   sensor.homeostat_return_floor       minutes; 0 = vacuous
@@ -139,7 +141,7 @@ template:
           zone: >
             {{ 'main' if states('input_number.homeostat_comfort_setpoint') | float(0) > 0
                else 'aux' }}
-          main_mode: "{{ states('sensor.homeostat_main_mode') }}"
+          main_mode: "{{ states('sensor.homeostat_desired_main_mode') }}"
           occupancy: "{{ states('sensor.homeostat_occupancy') }}"
           energy_period: "{{ states('sensor.homeostat_energy_period') }}"
           outdoor_temp: "{{ states('sensor.your_outdoor_temperature') | float(none) }}"
@@ -377,18 +379,26 @@ template:
             normal
           {% endif %}
 
-      - name: homeostat_main_mode
-        unique_id: homeostat_main_mode
-        # what the day demands of the main zone, from the outdoor forecast:
-        # off (no conditioning) strictly between the thresholds, cool above,
-        # heat below. Circulation on off days is the daemon's output-side
-        # decision (desired_fan_mode), not an input value. The drill knob
-        # wins when set.
-        state: >
-          {% set forced = states('input_select.homeostat_main_mode_override') %}
-          {% if forced in ['heat', 'cool', 'off'] %}
-            {{ forced }}
-          {% else %}
-            {% set t = states('sensor.your_forecast_high') | float(20) %}
-            {% if t >= 25 %}cool{% elif t <= 16 %}heat{% else %}off{% endif %}
-          {% endif %}
+      # Today's forecast high, forwarded as a plain number. Deliberately NOT
+      # turned into heat/cool/off here: that judgement is policy and lives in
+      # the daemon (decide.rs::demanded_mode) with every other temperature in
+      # the system. Perception's job is to find the number and name it.
+      #
+      # No | float() default: if your forecast source is missing, this must
+      # go unavailable so the daemon suspends and the thermostats hold their
+      # last setpoint. A default here silently invents weather - see
+      # docs/where-policy-lives.md.
+      - name: homeostat_forecast_max_today
+        unique_id: homeostat_forecast_max_today
+        unit_of_measurement: °C
+        device_class: temperature
+        state_class: measurement
+        availability: "{{ has_value('sensor.your_forecast_high') }}"
+        state: "{{ states('sensor.your_forecast_high') | float }}"
+
+      - name: homeostat_main_mode_override
+        unique_id: homeostat_main_mode_override
+        # Drill knob pass-through (simulate winter in July). 'auto' is not a
+        # mode: the daemon rejects it to "no override", so no translation is
+        # needed here.
+        state: "{{ states('input_select.homeostat_main_mode_override') }}"

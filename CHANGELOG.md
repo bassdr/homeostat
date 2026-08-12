@@ -2,6 +2,24 @@
 
 ## Unreleased
 
+- **BREAKING — `main_mode` policy moved into the daemon.** Perception no
+  longer publishes `sensor.homeostat_main_mode`. It publishes the *fact*
+  `sensor.homeostat_forecast_max_today` (today's forecast high, °C, required)
+  plus the optional drill knob `sensor.homeostat_main_mode_override`
+  (`auto`/`heat`/`cool`/`off`); the daemon turns them into a demanded mode in
+  `decide::demanded_mode`. Completes the pattern started by the away-ness and
+  `back_during_recovery` migrations: perception converts, the daemon decides.
+  **Deploy the perception package before this daemon version** — the old
+  entity is no longer read, and a missing forecast suspends decisions.
+- **The same-day heat/cool interlock is now a named, tested invariant.** The
+  house was already protected from being paid to heat and to cool within one
+  calendar day, but only as an emergent property of the gap between two
+  thresholds in a template — nothing named it, nothing tested it, and a
+  reader could not find it. It is now
+  `the_dead_band_makes_a_same_day_reversal_unreachable`, which fails in CI if
+  the band is narrowed. New `docs/where-policy-lives.md` records the layer
+  rule and the incident that motivated writing it down.
+
 - **`back_during_recovery` policy moved into the daemon.** Perception now
   emits `sensor.homeostat_recovery_horizon_minutes` (minutes until peak end
   + recovery window; a pure clock conversion) and the daemon owns the
