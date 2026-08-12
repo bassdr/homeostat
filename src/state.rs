@@ -6,7 +6,15 @@
 /// Entities the daemon subscribes to (perception layer, computed in HA).
 pub const ENTITY_OCCUPANCY: &str = "sensor.homeostat_occupancy";
 pub const ENTITY_ENERGY_PERIOD: &str = "sensor.homeostat_energy_period";
-pub const ENTITY_MAIN_MODE: &str = "sensor.homeostat_main_mode";
+// Today's forecast high, in C. A fact, not a verdict: the daemon owns the
+// thresholds that turn it into a demanded mode (decide.rs::demanded_mode),
+// so every policy temperature stays in one file. Required - a missing
+// forecast suspends decisions rather than fabricating a mild day.
+pub const ENTITY_FORECAST_MAX: &str = "sensor.homeostat_forecast_max_today";
+// Drill knob: force the demanded mode to exercise the matrix out of season
+// ("simulate winter in July"). Optional - `auto`, missing, unknown and
+// unavailable all mean "follow the forecast".
+pub const ENTITY_MAIN_MODE_OVERRIDE: &str = "sensor.homeostat_main_mode_override";
 pub const ENTITY_AUX_ZONE_OCCUPIED: &str = "binary_sensor.homeostat_aux_zone_occupied";
 // Manual comfort holds are enforced by the HA override (the wire stands
 // down; the human's setpoint persists in the device), so the daemon does
@@ -177,8 +185,8 @@ impl EnergyPeriod {
 }
 
 /// Main-zone conditioning vocabulary, shared by the perception input
-/// (`sensor.homeostat_main_mode`: what the day demands - heat, cool, or
-/// nothing) and the published decision (`desired_main_mode`: what to
+/// (what the day demands - heat, cool, or nothing, derived here from the
+/// forecast) and the published decision (`desired_main_mode`: what to
 /// command). "Fan" is deliberately not a value here: circulation is an
 /// output-side concept (`desired_fan_mode`) that some houses don't have.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -212,7 +220,9 @@ impl HvacMode {
 pub struct Inputs {
     pub occupancy: Occupancy,
     pub energy_period: EnergyPeriod,
-    /// What the day demands of the main zone (from the outdoor forecast).
+    /// What the day demands of the main zone. Derived from the forecast by
+    /// `decide::demanded_mode`, not read from perception - see
+    /// `docs/where-policy-lives.md`.
     pub main_mode: HvacMode,
     pub aux_zone_occupied: bool,
     /// Someone is expected home during the grid event or within the recovery
@@ -228,8 +238,11 @@ pub struct Inputs {
 pub struct RawInputs {
     presence: Option<Presence>,
     energy_period: Option<EnergyPeriod>,
-    main_mode: Option<HvacMode>,
+    forecast_max: Option<f64>,
     aux_zone_occupied: Option<bool>,
+    /// Optional: None = no drill running = follow the forecast. Distinct
+    /// from the required slots above, whose None suspends decisions.
+    main_mode_override: Option<HvacMode>,
     /// Plain f64, not Option: these inputs are optional by design -
     /// unavailable/unknown means "no estimate" and must not suspend
     /// decisions.
@@ -250,7 +263,12 @@ impl RawInputs {
         match entity_id {
             ENTITY_OCCUPANCY => Self::set(&mut self.presence, Presence::parse(state)),
             ENTITY_ENERGY_PERIOD => Self::set(&mut self.energy_period, EnergyPeriod::parse(state)),
-            ENTITY_MAIN_MODE => Self::set(&mut self.main_mode, HvacMode::parse(state)),
+            ENTITY_FORECAST_MAX => Self::set_req_f64(&mut self.forecast_max, state),
+            // HvacMode::parse rejects "auto" (and unknown/unavailable) to
+            // None, which is exactly "no override" for this slot.
+            ENTITY_MAIN_MODE_OVERRIDE => {
+                Self::set(&mut self.main_mode_override, HvacMode::parse(state))
+            }
             ENTITY_AUX_ZONE_OCCUPIED => Self::set(
                 &mut self.aux_zone_occupied,
                 match state {
@@ -275,6 +293,12 @@ impl RawInputs {
             *slot = value;
             true
         }
+    }
+
+    /// Required numeric input: unparseable clears the slot and suspends
+    /// decisions. The opposite of `set_f64`, whose inputs are optional.
+    fn set_req_f64(slot: &mut Option<f64>, state: &str) -> bool {
+        Self::set(slot, state.parse::<f64>().ok())
     }
 
     fn set_f64(slot: &mut f64, state: &str) -> bool {
@@ -308,7 +332,7 @@ impl RawInputs {
                 self.recovery_min,
             ),
             energy_period: self.energy_period?,
-            main_mode: self.main_mode?,
+            main_mode: crate::decide::demanded_mode(self.forecast_max?, self.main_mode_override),
             aux_zone_occupied: self.aux_zone_occupied?,
             back_during_recovery: back_during_recovery(
                 self.recovery_horizon_min,
@@ -329,11 +353,56 @@ mod tests {
         let mut raw = RawInputs::default();
         raw.ingest(ENTITY_OCCUPANCY, "home");
         raw.ingest(ENTITY_ENERGY_PERIOD, "normal");
-        raw.ingest(ENTITY_MAIN_MODE, "heat");
+        raw.ingest(ENTITY_FORECAST_MAX, "-5");
         raw.ingest(ENTITY_AUX_ZONE_OCCUPIED, "off");
         raw.ingest(ENTITY_RETURN_ETA, "unavailable");
         raw.complete()
             .expect("an optional input must not suspend decisions");
+    }
+
+    /// The forecast is a required input, and its absence must suspend rather
+    /// than fall back to a mild day. This is the regression test for the bug
+    /// that motivated moving the policy here: perception used to read a
+    /// forecast entity that had silently ceased to exist and apply
+    /// `| float(20)` to the result, so "no idea what the weather is" became
+    /// "a pleasant 20C day" and the house was commanded off for a whole
+    /// summer. Holding the last decision is loud; inventing weather is not.
+    #[test]
+    fn a_missing_forecast_suspends_instead_of_inventing_a_mild_day() {
+        let mut raw = RawInputs::default();
+        raw.ingest(ENTITY_OCCUPANCY, "home");
+        raw.ingest(ENTITY_ENERGY_PERIOD, "normal");
+        raw.ingest(ENTITY_AUX_ZONE_OCCUPIED, "off");
+        assert!(raw.complete().is_none(), "no forecast at all must suspend");
+
+        raw.ingest(ENTITY_FORECAST_MAX, "unavailable");
+        assert!(raw.complete().is_none(), "unavailable must suspend");
+
+        raw.ingest(ENTITY_FORECAST_MAX, "30");
+        assert_eq!(raw.complete().unwrap().main_mode, HvacMode::Cool);
+
+        // and it suspends again if the forecast later goes away
+        raw.ingest(ENTITY_FORECAST_MAX, "unknown");
+        assert!(raw.complete().is_none(), "losing the forecast re-suspends");
+    }
+
+    /// The drill knob outranks the forecast all the way through the input
+    /// boundary - "simulate winter in July" has to reach the matrix.
+    #[test]
+    fn the_drill_knob_overrides_the_forecast_end_to_end() {
+        let mut raw = RawInputs::default();
+        raw.ingest(ENTITY_OCCUPANCY, "home");
+        raw.ingest(ENTITY_ENERGY_PERIOD, "normal");
+        raw.ingest(ENTITY_AUX_ZONE_OCCUPIED, "off");
+        raw.ingest(ENTITY_FORECAST_MAX, "30");
+        assert_eq!(raw.complete().unwrap().main_mode, HvacMode::Cool);
+
+        raw.ingest(ENTITY_MAIN_MODE_OVERRIDE, "heat");
+        assert_eq!(raw.complete().unwrap().main_mode, HvacMode::Heat);
+
+        // 'auto' is the knob's rest position, not a mode: back to the forecast
+        raw.ingest(ENTITY_MAIN_MODE_OVERRIDE, "auto");
+        assert_eq!(raw.complete().unwrap().main_mode, HvacMode::Cool);
     }
 
     #[test]
@@ -341,7 +410,7 @@ mod tests {
         let mut raw = RawInputs::default();
         raw.ingest(ENTITY_OCCUPANCY, "unknown");
         raw.ingest(ENTITY_ENERGY_PERIOD, "normal");
-        raw.ingest(ENTITY_MAIN_MODE, "heat");
+        raw.ingest(ENTITY_FORECAST_MAX, "-5");
         raw.ingest(ENTITY_AUX_ZONE_OCCUPIED, "off");
         assert!(
             raw.complete().is_none(),
@@ -356,7 +425,7 @@ mod tests {
         let mut raw = RawInputs::default();
         raw.ingest(ENTITY_OCCUPANCY, "away_returning");
         raw.ingest(ENTITY_ENERGY_PERIOD, "normal");
-        raw.ingest(ENTITY_MAIN_MODE, "heat");
+        raw.ingest(ENTITY_FORECAST_MAX, "-5");
         raw.ingest(ENTITY_AUX_ZONE_OCCUPIED, "off");
         assert!(raw.complete().is_none());
     }
@@ -414,7 +483,7 @@ mod tests {
         let mut raw = RawInputs::default();
         raw.ingest(ENTITY_OCCUPANCY, "away");
         raw.ingest(ENTITY_ENERGY_PERIOD, "normal");
-        raw.ingest(ENTITY_MAIN_MODE, "heat");
+        raw.ingest(ENTITY_FORECAST_MAX, "-5");
         raw.ingest(ENTITY_AUX_ZONE_OCCUPIED, "off");
         raw.ingest(ENTITY_RETURN_ETA, "unavailable");
         raw.ingest(ENTITY_RETURN_FLOOR, "unknown");
@@ -471,7 +540,7 @@ mod tests {
         let mut raw = RawInputs::default();
         raw.ingest(ENTITY_OCCUPANCY, "away");
         raw.ingest(ENTITY_ENERGY_PERIOD, "preheat");
-        raw.ingest(ENTITY_MAIN_MODE, "heat");
+        raw.ingest(ENTITY_FORECAST_MAX, "-5");
         raw.ingest(ENTITY_AUX_ZONE_OCCUPIED, "off");
         // the horizon sensor never arrived (0) -> comfort-safe normal preheat
         assert!(raw.complete().unwrap().back_during_recovery);

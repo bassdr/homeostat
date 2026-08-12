@@ -48,7 +48,8 @@ with dummy source names is in
 |---|---|---|
 | `sensor.homeostat_occupancy` | `home` `home_asleep` `away` | presence facts only |
 | `sensor.homeostat_energy_period` | `normal` `preheat` `peak` | your demand-response program (Hydro-Québec winter credit, Tempo, Octopus events, plain TOU) |
-| `sensor.homeostat_main_mode` | `heat` `cool` `off` | what the day demands of the main zone; `off` = no conditioning (the daemon still decides circulation via `desired_fan_mode`) |
+| `sensor.homeostat_forecast_max_today` | °C | today's forecast high — a *fact*. The daemon owns the thresholds that turn it into heat/cool/off, so every policy temperature stays in one file ([why](docs/where-policy-lives.md)) |
+| `sensor.homeostat_main_mode_override` | `auto` `heat` `cool` `off` | optional drill knob: force the demanded mode to exercise the matrix out of season. `auto`/missing = follow the forecast |
 | `binary_sensor.homeostat_aux_zone_occupied` | `on`/`off` | secondary zone (e.g. basement) in use |
 | `sensor.homeostat_return_eta` | minutes, `0` = no estimate | credible time-until-someone-is-home (nav, calendar, manual) |
 | `sensor.homeostat_return_floor` | minutes, `0` = vacuous | earliest *possible* arrival (travel time / distance) — a lower bound, always true |
@@ -100,9 +101,16 @@ incident in `src/decide.rs`.
 ## Design invariants
 
 - **The matrix is a pure function** (`src/decide.rs`): every temperature in
-  the system lives in one file, exhaustively matched — an unhandled
-  combination is a compile error, and a property test forbids any decision
-  from ever commanding near-freezing setpoints.
+  the system lives in one file — the setpoint matrix in `decide()`, the
+  heat/cool thresholds in `demanded_mode()` — exhaustively matched. An
+  unhandled combination is a compile error, and a property test forbids any
+  decision from ever commanding near-freezing setpoints.
+- **Perception converts; the daemon decides.** Inputs are facts (unit
+  conversions, clock arithmetic, latches). Every threshold, comparison and
+  trade-off lives in the daemon, where it is typed and tested. When a number
+  is chosen for a reason, that reason belongs in Rust —
+  [docs/where-policy-lives.md](docs/where-policy-lives.md) explains what
+  happens when it isn't.
 - **Fail loud, fail safe**: garbage inputs suspend decisions; death is
   visible (last-will + heartbeat); shadow mode (gate off) lets you compare
   decisions against your existing setup for as long as you like before

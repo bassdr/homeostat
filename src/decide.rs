@@ -1,8 +1,10 @@
 //! Layer 2: the decision matrix as a pure function, and layer 3's write
-//! planner. Every temperature in the system lives in `decide()`. The
-//! compiler enforces that every (main_mode, energy_period, occupancy)
-//! combination is handled — the class of gap that caused the 2026-07-07
-//! incident cannot compile.
+//! planner. Every temperature in the system lives in this file — the
+//! setpoint matrix in `decide()`, the mode thresholds in `demanded_mode()`.
+//! Perception hands over facts only; nothing outside this file chooses a
+//! number. The compiler enforces that every (main_mode, energy_period,
+//! occupancy) combination is handled — the class of gap that caused the
+//! 2026-07-07 incident cannot compile.
 
 use crate::state::{EnergyPeriod, HvacMode, Inputs, Occupancy};
 
@@ -11,6 +13,50 @@ use crate::state::{EnergyPeriod, HvacMode, Inputs, Occupancy};
 /// defending the house even if daemon, HA and network all die. Only
 /// deferrable loads (load_shed) are ever fully off.
 const AUX_FROST_FLOOR: f64 = 5.0;
+
+/// Today's forecast high at or below which the day demands heating, and at
+/// or above which it demands cooling. Strictly between them the house is
+/// conditioned in neither direction - only circulated (see `fan_mode`).
+/// Inherited unchanged from the pre-daemon automation these replaced.
+const HEAT_AT_OR_BELOW: f64 = 16.0;
+const COOL_AT_OR_ABOVE: f64 = 25.0;
+
+/// The widest revision of *today's* forecast high that can happen while the
+/// day is running. Not the day-to-day swing, which is far larger: a forecast
+/// for a maximum only sharpens as that day progresses. Exists solely to be
+/// compared against the dead band - see the test named after it. Test-only
+/// because it describes the weather, not the house: nothing reads it at
+/// runtime, it only has to hold for the interlock to be sound.
+#[cfg(test)]
+const MAX_INTRADAY_FORECAST_REVISION: f64 = 9.0;
+
+/// What the day demands of the main zone, from today's forecast high.
+///
+/// **The gap between the two thresholds is load-bearing.** It is the entire
+/// same-day heat/cool interlock: the house must never be paid to heat and to
+/// cool within one calendar day, and nothing enforces that at runtime. It
+/// holds because crossing both thresholds inside one day would take a
+/// forecast revision wider than any that occurs. Keep them far apart - the
+/// invariant test below is what makes a narrowing fail here rather than on
+/// the electricity bill. See `docs/where-policy-lives.md` for the incident
+/// that motivated writing this down: a reader could not see the interlock,
+/// because an invariant that is only the distance between two constants is
+/// invisible.
+///
+/// `forced` is the drill knob (simulate winter in July). It wins outright,
+/// which is what makes the matrix exercisable out of season.
+pub fn demanded_mode(forecast_max: f64, forced: Option<HvacMode>) -> HvacMode {
+    if let Some(mode) = forced {
+        return mode;
+    }
+    if forecast_max >= COOL_AT_OR_ABOVE {
+        HvacMode::Cool
+    } else if forecast_max <= HEAT_AT_OR_BELOW {
+        HvacMode::Heat
+    } else {
+        HvacMode::Off
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FanMode {
@@ -46,8 +92,10 @@ pub fn decide(i: &Inputs) -> Desired {
     use HvacMode::*;
     use Occupancy::*;
 
-    // The demanded mode passes straight through today; policies that
-    // override it (e.g. forcing off in a mild away week) would live here.
+    // Already decided: `demanded_mode()` turned the forecast into this at
+    // the input boundary, drill knob included. It passes through here
+    // untouched. Policies that would override an already-demanded mode
+    // (e.g. forcing off in a mild away week) belong here, in this function.
     let main_mode = i.main_mode;
 
     let main_setpoint = match i.main_mode {
@@ -161,6 +209,42 @@ mod tests {
             aux_zone_occupied: false,
             back_during_recovery: true,
         }
+    }
+
+    /// The same-day heat/cool interlock, and the reason it needs no
+    /// machinery. Paying to heat and to cool within one calendar day is
+    /// never right, and the protection against it is not a latch or a
+    /// state machine - it is that the two thresholds are further apart than
+    /// today's forecast high can move while today is happening. Narrow the
+    /// dead band and this fails, which is the whole point: the property is
+    /// otherwise invisible, being an emergent consequence of two constants
+    /// rather than any code you can read.
+    #[test]
+    fn the_dead_band_makes_a_same_day_reversal_unreachable() {
+        let dead_band = COOL_AT_OR_ABOVE - HEAT_AT_OR_BELOW;
+        assert!(
+            dead_band >= MAX_INTRADAY_FORECAST_REVISION,
+            "dead band is {dead_band}C, narrower than a reachable intraday \
+             forecast revision ({MAX_INTRADAY_FORECAST_REVISION}C): one \
+             calendar day could then demand heating and cooling in turn"
+        );
+    }
+
+    /// Both thresholds are inclusive, and the drill knob outranks the
+    /// forecast so the matrix stays exercisable out of season.
+    #[test]
+    fn demanded_mode_reads_the_forecast_and_yields_to_the_drill_knob() {
+        use HvacMode::*;
+
+        assert_eq!(demanded_mode(25.0, None), Cool, "cool is inclusive");
+        assert_eq!(demanded_mode(24.9, None), Off);
+        assert_eq!(demanded_mode(16.0, None), Heat, "heat is inclusive");
+        assert_eq!(demanded_mode(16.1, None), Off);
+        assert_eq!(demanded_mode(20.0, None), Off, "dead band circulates");
+
+        assert_eq!(demanded_mode(30.0, Some(Heat)), Heat, "drill wins");
+        assert_eq!(demanded_mode(-20.0, Some(Cool)), Cool);
+        assert_eq!(demanded_mode(30.0, Some(Off)), Off);
     }
 
     /// Hard safety invariant: indoor anywhere near 0C risks breaking the
@@ -351,18 +435,23 @@ mod tests {
     #[test]
     fn returning_home_scenarios() {
         use crate::state::{
-            RawInputs, ENTITY_AUX_ZONE_OCCUPIED, ENTITY_ENERGY_PERIOD, ENTITY_MAIN_MODE,
+            RawInputs, ENTITY_AUX_ZONE_OCCUPIED, ENTITY_ENERGY_PERIOD, ENTITY_FORECAST_MAX,
             ENTITY_OCCUPANCY, ENTITY_RECOVERY_HORIZON, ENTITY_RECOVERY_MINUTES, ENTITY_RETURN_ETA,
             ENTITY_RETURN_FLOOR, ENTITY_SLEPT_AWAY,
         };
 
-        // occupancy, period, mode, return_eta, return_floor, recovery,
-        // recovery_horizon (all minutes), slept_away -> the decided Inputs
+        /// Representative forecast highs either side of the dead band, so
+        /// these scenarios read as seasons rather than as numbers.
+        const WINTER_DAY: f64 = -5.0;
+        const SUMMER_DAY: f64 = 30.0;
+
+        // occupancy, period, forecast high, return_eta, return_floor,
+        // recovery, recovery_horizon (minutes), slept_away -> decided Inputs
         #[allow(clippy::too_many_arguments)]
         fn perceive(
             occ: &str,
             period: &str,
-            mode: &str,
+            forecast_max: f64,
             eta: f64,
             floor: f64,
             recovery: f64,
@@ -372,7 +461,7 @@ mod tests {
             let mut raw = RawInputs::default();
             raw.ingest(ENTITY_OCCUPANCY, occ);
             raw.ingest(ENTITY_ENERGY_PERIOD, period);
-            raw.ingest(ENTITY_MAIN_MODE, mode);
+            raw.ingest(ENTITY_FORECAST_MAX, &forecast_max.to_string());
             raw.ingest(ENTITY_AUX_ZONE_OCCUPIED, "off");
             raw.ingest(ENTITY_RETURN_ETA, &eta.to_string());
             raw.ingest(ENTITY_RETURN_FLOOR, &floor.to_string());
@@ -386,14 +475,14 @@ mod tests {
         // (return_eta = floor = 20), warm baseline (recovery 0), no grid
         // event (horizon 0). The 20-min comfort pre-start: returning gets the
         // full home target early, not the away setback.
-        let i = perceive("away", "normal", "heat", 20.0, 20.0, 0.0, 0.0, "off");
+        let i = perceive("away", "normal", WINTER_DAY, 20.0, 20.0, 0.0, 0.0, "off");
         assert_eq!(i.occupancy, Occupancy::AwayReturning);
         assert_eq!(decide(&i).main_setpoint, 22.5, "winter returning, no peak");
 
         // Case 3 - Summer, heading home. Same 20-min lead, cool day. The
         // house should be AT comfort on arrival (25), never the deep 28
         // away setback. (Previously only guarded by the >=20 cool sweep.)
-        let i = perceive("away", "normal", "cool", 20.0, 20.0, 0.0, 0.0, "off");
+        let i = perceive("away", "normal", SUMMER_DAY, 20.0, 20.0, 0.0, 0.0, "off");
         assert_eq!(i.occupancy, Occupancy::AwayReturning);
         let d = decide(&i);
         assert_eq!(d.main_mode, HvacMode::Cool);
@@ -404,14 +493,14 @@ mod tests {
         // hours away, so someone is credibly back before the house recovers
         // -> boost the preheat. This is the scenario whose failure mode is
         // "cold for a very long time".
-        let i = perceive("away", "preheat", "heat", 45.0, 45.0, 0.0, 540.0, "off");
+        let i = perceive("away", "preheat", WINTER_DAY, 45.0, 45.0, 0.0, 540.0, "off");
         assert!(i.back_during_recovery, "back before horizon -> boost");
         assert_eq!(decide(&i).main_setpoint, 23.0, "evening peak preheats");
 
         // Case 2, thrift end - PROVABLY absent past the horizon. Genuinely
         // far (floor 240) with the horizon only 180 out: no one can be back
         // before the house recovers, so drop the boost and let the peak fall.
-        let i = perceive("away", "preheat", "heat", 0.0, 240.0, 0.0, 180.0, "off");
+        let i = perceive("away", "preheat", WINTER_DAY, 0.0, 240.0, 0.0, 180.0, "off");
         assert!(!i.back_during_recovery, "provably absent -> no boost");
         assert_eq!(i.occupancy, Occupancy::AwayFar);
         assert_eq!(decide(&i).main_setpoint, 17.0, "bare preheat, far & absent");
@@ -422,7 +511,7 @@ mod tests {
         // event", so the morning preheat is skipped - hold the far setback.
         // Same symmetric rule as the evening; the slept_away FACT (mornings
         // follow nights) is what distinguishes them, not a wall clock.
-        let i = perceive("away", "preheat", "heat", 0.0, 120.0, 0.0, 540.0, "on");
+        let i = perceive("away", "preheat", WINTER_DAY, 0.0, 120.0, 0.0, 540.0, "on");
         assert!(!i.back_during_recovery, "slept away, no evidence -> skip");
         assert_eq!(i.occupancy, Occupancy::AwayFar);
         assert_eq!(decide(&i).main_setpoint, 17.0, "morning slept-away skips");
@@ -430,7 +519,7 @@ mod tests {
         // Case 2, morning counter-case: slept away but ACTUALLY heading
         // home (nav estimate 60 min, well inside the horizon). Real return
         // evidence outranks the overnight assumption - preheat resumes.
-        let i = perceive("away", "preheat", "heat", 60.0, 60.0, 0.0, 540.0, "on");
+        let i = perceive("away", "preheat", WINTER_DAY, 60.0, 60.0, 0.0, 540.0, "on");
         assert!(
             i.back_during_recovery,
             "evidence of return beats slept_away"
