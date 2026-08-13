@@ -11,10 +11,44 @@
 #               into an override (the wire stands down) and a manual "off"
 #               into a resume.
 #
-# THE rule for the main wire: write the mode BEFORE the setpoint, always
-# both, from this one automation. A setpoint landing on a stale mode is how
-# a house gets cooled to 19C all afternoon.
+# THE rule for the main wire: write the mode BEFORE the setpoints, always
+# together, from this one automation. A setpoint landing on a stale mode is
+# how a house gets cooled to 19C all afternoon.
+#
+# The daemon publishes an INTENT (heat / cool / circulate / off) and a full
+# BAND (heat_setpoint + cool_setpoint, always both). It does not know what
+# your equipment can do. THIS FILE is where that knowledge lives, in exactly
+# one template sensor - see homeostat_device_hvac_mode below.
 # =============================================================================
+
+template:
+  # The daemon's intent, translated into YOUR thermostat's vocabulary. It is
+  # its own sensor so the wire and the override detector read one value from
+  # one place; if they disagree, the detector sees the wire's own writes as a
+  # human grabbing the wheel and stands the wire down permanently.
+  #
+  # Pick the variant that matches your equipment:
+  #
+  #   Thermostat WITH heat_cool (it picks the direction itself - hand it the
+  #   whole band and let its own staging, lockouts and balance point work):
+  #       {{ 'off' if intent == 'off' else 'heat_cool' }}
+  #
+  #   Thermostat WITHOUT heat_cool (you pick the direction; the wire then
+  #   sends the matching side of the band). Circulation has nowhere to go on
+  #   such a device unless it has a fan_only mode - if it does, map to it;
+  #   if it does not, mapping circulate to 'cool' with the band's high side
+  #   keeps air moving without conditioning:
+  #       {{ 'fan_only' if intent == 'circulate' else intent }}
+  #
+  # Changing thermostats means editing this sensor. The daemon does not move.
+  - sensor:
+      - name: homeostat_device_hvac_mode
+        unique_id: homeostat_device_hvac_mode
+        icon: mdi:swap-horizontal
+        availability: "{{ has_value('sensor.homeostat_desired_main_mode') }}"
+        state: >
+          {% set intent = states('sensor.homeostat_desired_main_mode') %}
+          {{ 'off' if intent == 'off' else 'heat_cool' }}
 
 automation:
   # ---------------------------------------------------------------
@@ -210,10 +244,16 @@ automation:
               - condition: state
                 entity_id: input_boolean.homeostat_main_override
                 state: "off"
+              # Compare in DEVICE vocabulary, read from the same sensor the
+              # wire writes from - they MUST agree. The daemon publishes an
+              # intent ('circulate'); your device reports whatever the wire
+              # actually sent ('heat_cool'). Comparing the raw words makes
+              # every mode change the wire itself made look like a human
+              # grabbing the wheel, which stands the wire down for good.
               - condition: template
                 value_template: >
                   {{ trigger.to_state.state
-                     != state_attr('sensor.homeostat_desired', 'main_mode') }}
+                     != states('sensor.homeostat_device_hvac_mode') }}
             sequence:
               - action: input_boolean.turn_on
                 target: { entity_id: input_boolean.homeostat_main_override }
@@ -222,11 +262,14 @@ automation:
                   m: "{{ trigger.to_state.state }}"
                   picked: >
                     {{ (a.temperature if a.temperature is defined and a.temperature
-                        else (a.target_temp_high if m == 'cool'
+                        else (a.target_temp_high if m in ['cool', 'heat_cool']
                         else (a.target_temp_low if m == 'heat' else 0))) | float(0) }}
-                  desired: "{{ states('sensor.homeostat_desired_main_setpoint') | float(-99) }}"
+                  desired: >
+                    {{ states('sensor.homeostat_desired_cool_setpoint')
+                       if m in ['cool', 'heat_cool']
+                       else states('sensor.homeostat_desired_heat_setpoint') }}
               - if:
-                  - "{{ picked > 0 and (picked - desired) | abs > 0.25 }}"
+                  - "{{ picked > 0 and (picked - desired | float(-99)) | abs > 0.25 }}"
                 then:
                   - action: input_number.set_value
                     target: { entity_id: input_number.homeostat_comfort_setpoint }
@@ -237,17 +280,27 @@ automation:
           - conditions:
               - "{{ trigger.id in ['single', 'range_low', 'range_high'] }}"
               - "{{ trigger.from_state.state != 'off' }}"
+              # Each side of the range is compared against its OWN desired
+              # setpoint. Under heat_cool both sides are live, so either one
+              # being moved by hand is a real override.
               - condition: template
                 value_template: >
-                  {% set demand = states('sensor.homeostat_main_mode') %}
                   {% set a = trigger.to_state.attributes %}
-                  {% set new = a.temperature if trigger.id == 'single'
-                     else (a.target_temp_low if trigger.id == 'range_low' and demand != 'cool'
-                     else (a.target_temp_high if trigger.id == 'range_high' and demand != 'heat'
-                     else none)) %}
-                  {% set desired = states('sensor.homeostat_desired_main_setpoint') | float(-99) %}
+                  {% set demand = states('sensor.homeostat_desired_main_mode') %}
+                  {% if trigger.id == 'range_low' %}
+                    {% set new = a.target_temp_low %}
+                    {% set desired = states('sensor.homeostat_desired_heat_setpoint') %}
+                  {% elif trigger.id == 'range_high' %}
+                    {% set new = a.target_temp_high %}
+                    {% set desired = states('sensor.homeostat_desired_cool_setpoint') %}
+                  {% else %}
+                    {% set new = a.temperature %}
+                    {% set desired = states('sensor.homeostat_desired_heat_setpoint')
+                       if demand == 'heat'
+                       else states('sensor.homeostat_desired_cool_setpoint') %}
+                  {% endif %}
                   {{ new is not none and new | float(0) > 0
-                     and (new | float(0) - desired) | abs > 0.25 }}
+                     and (new | float(0) - desired | float(-99)) | abs > 0.25 }}
             sequence:
               - action: input_number.set_value
                 target: { entity_id: input_number.homeostat_comfort_setpoint }
@@ -345,7 +398,7 @@ automation:
   - id: homeostat_wire_main_zone
     alias: "Homeostat wire: main zone"
     triggers:
-      # the combined state string encodes mode/setpoint/fan, so any change
+      # the combined state string encodes mode/heat/cool/fan, so any change
       # re-sends the whole triple atomically
       - trigger: state
         entity_id: sensor.homeostat_desired
@@ -376,23 +429,38 @@ automation:
     actions:
       - variables:
           mode: "{{ state_attr('sensor.homeostat_desired', 'main_mode') }}"
-          setpoint: "{{ state_attr('sensor.homeostat_desired', 'main_setpoint') }}"
+          heat_setpoint: "{{ state_attr('sensor.homeostat_desired', 'heat_setpoint') }}"
+          cool_setpoint: "{{ state_attr('sensor.homeostat_desired', 'cool_setpoint') }}"
           fan: "{{ state_attr('sensor.homeostat_desired', 'fan_mode') }}"
-      # mode before setpoint, always together - do not split or reorder
+          device_mode: "{{ states('sensor.homeostat_device_hvac_mode') }}"
+      # mode before setpoints, always together - do not split or reorder
       - action: climate.set_hvac_mode
         target:
           entity_id: climate.your_main_hvac
         data:
-          hvac_mode: "{{ mode }}"
-      - if:
-          - condition: template
-            value_template: "{{ mode != 'off' }}"
-        then:
-          - action: climate.set_temperature
-            target:
-              entity_id: climate.your_main_hvac
-            data:
-              temperature: "{{ setpoint }}"
+          hvac_mode: "{{ device_mode }}"
+      - choose:
+          # heat_cool takes a RANGE. target_temperature is None in this mode
+          # and the device reads target_temp_low/high instead, so sending
+          # `temperature` here silently does nothing.
+          - conditions: "{{ device_mode == 'heat_cool' }}"
+            sequence:
+              - action: climate.set_temperature
+                target:
+                  entity_id: climate.your_main_hvac
+                data:
+                  target_temp_low: "{{ heat_setpoint }}"
+                  target_temp_high: "{{ cool_setpoint }}"
+          # A device that cannot decide a direction takes one setpoint: use
+          # the intent to pick the side of the band that is doing the work.
+          - conditions: "{{ device_mode in ['heat', 'cool'] }}"
+            sequence:
+              - action: climate.set_temperature
+                target:
+                  entity_id: climate.your_main_hvac
+                data:
+                  temperature: >
+                    {{ heat_setpoint if device_mode == 'heat' else cool_setpoint }}
       - action: climate.set_fan_mode
         target:
           entity_id: climate.your_main_hvac
