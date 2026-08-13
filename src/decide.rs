@@ -16,10 +16,29 @@ const AUX_FROST_FLOOR: f64 = 5.0;
 
 /// Today's forecast high at or below which the day demands heating, and at
 /// or above which it demands cooling. Strictly between them the house is
-/// conditioned in neither direction - only circulated (see `fan_mode`).
+/// conditioned in neither direction - only circulated (`HvacMode::Circulate`),
+/// unless it overheats anyway (see `RESCUE_COOL_AT_OR_ABOVE`).
 /// Inherited unchanged from the pre-daemon automation these replaced.
 const HEAT_AT_OR_BELOW: f64 = 16.0;
 const COOL_AT_OR_ABOVE: f64 = 25.0;
+
+/// Indoor temperature at or above which a *mild* day starts cooling
+/// anyway - the point where "comfortable with air moving" stops being
+/// true and one more degree, or ten points of humidex, tips it. Only
+/// consulted inside the dead band; a day the forecast calls hot cools on
+/// the forecast alone, and a day it calls cold is never reachable from
+/// here (see `demanded_mode`). Compared against today's running indoor
+/// maximum, which is what makes it stick once crossed.
+const RESCUE_COOL_AT_OR_ABOVE: f64 = 27.0;
+
+/// The setpoint that expresses `Circulate` on equipment with no fan-only
+/// mode: cooling asked for at a temperature the house will not reach, so
+/// the compressor stays idle while the air handler runs (layer 3 sends
+/// this as a cool setpoint - see the wire). Deliberately not absurd: if
+/// the house really does hit 30C on a day the forecast called mild, and
+/// the rescue latch somehow did not fire, cooling is the right answer
+/// anyway. Well inside the device's cool_setpoint_max of 36.
+const CIRCULATE_SETPOINT: f64 = 30.0;
 
 /// The widest revision of *today's* forecast high that can happen while the
 /// day is running. Not the day-to-day swing, which is far larger: a forecast
@@ -45,7 +64,29 @@ const MAX_INTRADAY_FORECAST_REVISION: f64 = 9.0;
 ///
 /// `forced` is the drill knob (simulate winter in July). It wins outright,
 /// which is what makes the matrix exercisable out of season.
-pub fn demanded_mode(forecast_max: f64, forced: Option<HvacMode>) -> HvacMode {
+///
+/// `indoor_max_today` drives the mild-day rescue: a day the forecast
+/// called mild can still overheat the house (sun, cooking, bodies,
+/// humidity). Perception supplies today's running indoor maximum - a
+/// fact, with no threshold in it - and the comparison happens here, so
+/// the rescue temperature sits beside every other policy temperature.
+///
+/// **A running maximum, not the current reading, and that is the whole
+/// hysteresis.** A maximum only climbs until midnight, so once the house
+/// has been too hot it stays too hot as far as this function is
+/// concerned, and the cooling runs to its setpoint. Comparing the live
+/// temperature instead would start the compressor at 27.0 and stop it
+/// again at 26.9 - a 0.1C oscillation, not a 27-to-25 pull.
+///
+/// **The rescue cannot reach a heating day.** The `Heat` arm returns
+/// before it is consulted, so the same-day interlock below is untouched:
+/// no indoor reading can produce cooling on a day the forecast demands
+/// heat. That ordering is load-bearing, and it has its own test.
+pub fn demanded_mode(
+    forecast_max: f64,
+    indoor_max_today: f64,
+    forced: Option<HvacMode>,
+) -> HvacMode {
     if let Some(mode) = forced {
         return mode;
     }
@@ -53,8 +94,10 @@ pub fn demanded_mode(forecast_max: f64, forced: Option<HvacMode>) -> HvacMode {
         HvacMode::Cool
     } else if forecast_max <= HEAT_AT_OR_BELOW {
         HvacMode::Heat
+    } else if indoor_max_today >= RESCUE_COOL_AT_OR_ABOVE {
+        HvacMode::Cool
     } else {
-        HvacMode::Off
+        HvacMode::Circulate
     }
 }
 
@@ -92,13 +135,29 @@ pub fn decide(i: &Inputs) -> Desired {
     use HvacMode::*;
     use Occupancy::*;
 
-    // Already decided: `demanded_mode()` turned the forecast into this at
-    // the input boundary, drill knob included. It passes through here
-    // untouched. Policies that would override an already-demanded mode
-    // (e.g. forcing off in a mild away week) belong here, in this function.
-    let main_mode = i.main_mode;
+    // `demanded_mode()` turned the forecast into this at the input
+    // boundary, drill knob included - this is the one policy that
+    // overrides an already-demanded mode, which the layer rule puts here
+    // rather than at the boundary.
+    //
+    // Circulation is a comfort service for people who are in the house,
+    // and unlike an idle thermostat it costs blower power continuously.
+    // An empty house does not need moving air, and during a grid peak it
+    // is exactly the kind of load we are trying not to draw. Both fall
+    // back to a true `Off`. `AwayReturning` keeps circulating on purpose:
+    // same reasoning as its setpoint cell, the house should already be
+    // pleasant on arrival rather than starting to be.
+    let main_mode = match (i.main_mode, i.occupancy, i.energy_period) {
+        (Circulate, _, Peak) => Off,
+        (Circulate, Away | AwayFar, _) => Off,
+        (mode, _, _) => mode,
+    };
 
-    let main_setpoint = match i.main_mode {
+    let main_setpoint = match main_mode {
+        // Not a comfort target: the unreachable setpoint IS the mechanism
+        // (see CIRCULATE_SETPOINT). Occupancy cannot change it - a house
+        // that is circulating is by definition not conditioning.
+        Circulate => CIRCULATE_SETPOINT,
         Cool => match i.occupancy {
             Home => 25.0,
             HomeAsleep => 24.0,
@@ -157,9 +216,13 @@ pub fn decide(i: &Inputs) -> Desired {
     // override's visible cost. The held value lives in HA only, as a record
     // (dashboard + tuning collector); the daemon does not read it.
 
-    // circulation on off days (mode off + fan on) and whenever someone is
-    // home; fan is an output-side concept only - see state.rs::HvacMode
-    let fan_mode = if i.main_mode == Off || i.occupancy.is_home() {
+    // David's rule, verbatim: always on while home, on demand during a
+    // peak or while away. Note this no longer keys off the mode at all.
+    // It used to force the fan on whenever the mode was `Off`, which was
+    // both useless (an off system ignores the fan setting - the bug that
+    // produced `Circulate`) and backwards, since `Off` now means an empty
+    // house or a grid peak, the two cases that want the fan on demand.
+    let fan_mode = if i.occupancy.is_home() && i.energy_period != Peak {
         FanMode::On
     } else {
         FanMode::Auto
@@ -172,8 +235,8 @@ pub fn decide(i: &Inputs) -> Desired {
     // network are all dead, which is exactly when it matters. A shoulder-
     // season basement at 14C stays unheated (the floor never engages above
     // 5C), and a grid preheat on an off day boosts nothing.
-    let aux_zone_setpoint = match (i.main_mode, i.energy_period) {
-        (Cool | Off, _) => AUX_FROST_FLOOR,
+    let aux_zone_setpoint = match (main_mode, i.energy_period) {
+        (Cool | Circulate | Off, _) => AUX_FROST_FLOOR,
         (Heat, Peak) => AUX_FROST_FLOOR,
         (Heat, Preheat) => 26.0,
         // aux holds, like main holds, are enforced by the HA override, not
@@ -236,15 +299,54 @@ mod tests {
     fn demanded_mode_reads_the_forecast_and_yields_to_the_drill_knob() {
         use HvacMode::*;
 
-        assert_eq!(demanded_mode(25.0, None), Cool, "cool is inclusive");
-        assert_eq!(demanded_mode(24.9, None), Off);
-        assert_eq!(demanded_mode(16.0, None), Heat, "heat is inclusive");
-        assert_eq!(demanded_mode(16.1, None), Off);
-        assert_eq!(demanded_mode(20.0, None), Off, "dead band circulates");
+        assert_eq!(demanded_mode(25.0, 0.0, None), Cool, "cool is inclusive");
+        assert_eq!(demanded_mode(24.9, 0.0, None), Circulate);
+        assert_eq!(demanded_mode(16.0, 0.0, None), Heat, "heat is inclusive");
+        assert_eq!(demanded_mode(16.1, 0.0, None), Circulate);
+        assert_eq!(
+            demanded_mode(20.0, 0.0, None),
+            Circulate,
+            "dead band circulates"
+        );
 
-        assert_eq!(demanded_mode(30.0, Some(Heat)), Heat, "drill wins");
-        assert_eq!(demanded_mode(-20.0, Some(Cool)), Cool);
-        assert_eq!(demanded_mode(30.0, Some(Off)), Off);
+        assert_eq!(demanded_mode(30.0, 0.0, Some(Heat)), Heat, "drill wins");
+        assert_eq!(demanded_mode(-20.0, 0.0, Some(Cool)), Cool);
+        assert_eq!(demanded_mode(30.0, 0.0, Some(Off)), Off);
+    }
+
+    /// The mild-day rescue: a day the forecast called mild that overheated
+    /// anyway. It promotes circulation to cooling, and - the part that
+    /// matters - it cannot reach a heating day, so it cannot open a
+    /// same-day heat/cool reversal through the back door.
+    #[test]
+    fn the_indoor_rescue_promotes_circulation_but_never_reaches_a_heat_day() {
+        use HvacMode::*;
+
+        assert_eq!(demanded_mode(20.0, 0.0, None), Circulate, "mild, fine");
+        assert_eq!(
+            demanded_mode(20.0, RESCUE_COOL_AT_OR_ABOVE, None),
+            Cool,
+            "mild, overheated"
+        );
+
+        // The whole interlock argument in one assertion: on a day cold
+        // enough to demand heat, no indoor reading whatsoever produces
+        // cooling. Sweep the heating half of the range rather than
+        // spot-check, so narrowing the band cannot quietly open a gap.
+        let mut forecast = -30.0;
+        while forecast <= HEAT_AT_OR_BELOW {
+            assert_eq!(
+                demanded_mode(forecast, 40.0, None),
+                Heat,
+                "an overheated room must not command cooling on a {forecast}C \
+                 heating day - that is the same-day reversal the dead band exists \
+                 to prevent"
+            );
+            forecast += 0.5;
+        }
+
+        // The drill knob still outranks everything, latch included.
+        assert_eq!(demanded_mode(20.0, 40.0, Some(Off)), Off);
     }
 
     /// Hard safety invariant: indoor anywhere near 0C risks breaking the
@@ -408,11 +510,50 @@ mod tests {
         assert_eq!(decide(&i).main_setpoint, 12.0, "peak cells unchanged");
     }
 
+    /// The bug this replaced: a mild day commanded `Off` and asked for the
+    /// fan separately, which the equipment ignores because `off` stops the
+    /// air handler too. A mild day at home must never command `Off`.
     #[test]
-    fn off_day_turns_mode_off_but_keeps_fan_on() {
-        let i = inputs(Occupancy::Home, EnergyPeriod::Normal, HvacMode::Off);
-        let d = decide(&i);
-        assert_eq!(d.main_mode, HvacMode::Off);
+    fn a_mild_day_at_home_circulates_rather_than_going_off() {
+        let d = decide(&inputs(
+            Occupancy::Home,
+            EnergyPeriod::Normal,
+            HvacMode::Circulate,
+        ));
+        assert_eq!(d.main_mode, HvacMode::Circulate);
+        assert_eq!(d.fan_mode, FanMode::On);
+        assert_eq!(
+            d.main_setpoint, CIRCULATE_SETPOINT,
+            "circulation is expressed as cooling that cannot engage"
+        );
+    }
+
+    /// David's rule: the fan is always on while home, on demand during a
+    /// peak or while away - and circulation, which costs blower power
+    /// continuously, is not worth paying for in either of those.
+    #[test]
+    fn circulation_and_the_fan_stand_down_when_away_or_during_a_peak() {
+        use EnergyPeriod::*;
+        use Occupancy::*;
+
+        for occupancy in [Away, AwayFar] {
+            let d = decide(&inputs(occupancy, Normal, HvacMode::Circulate));
+            assert_eq!(d.main_mode, HvacMode::Off, "empty house: truly off");
+            assert_eq!(d.fan_mode, FanMode::Auto);
+        }
+
+        let d = decide(&inputs(Home, Peak, HvacMode::Circulate));
+        assert_eq!(d.main_mode, HvacMode::Off, "grid peak: shed the blower");
+        assert_eq!(d.fan_mode, FanMode::Auto);
+
+        // Returning is the deliberate exception - be pleasant on arrival,
+        // not starting to be, exactly like its setpoint cell.
+        let d = decide(&inputs(AwayReturning, Normal, HvacMode::Circulate));
+        assert_eq!(d.main_mode, HvacMode::Circulate);
+
+        // Asleep is home: still circulating, still moving air.
+        let d = decide(&inputs(HomeAsleep, Normal, HvacMode::Circulate));
+        assert_eq!(d.main_mode, HvacMode::Circulate);
         assert_eq!(d.fan_mode, FanMode::On);
     }
 
@@ -540,7 +681,7 @@ mod tests {
         use HvacMode::*;
         use Occupancy::*;
 
-        for main_mode in [Off, Cool] {
+        for main_mode in [Off, Cool, Circulate] {
             for energy_period in [Normal, Preheat, Peak] {
                 for occupancy in [Home, HomeAsleep, AwayReturning, Away, AwayFar] {
                     for back_during_recovery in [true, false] {

@@ -1,5 +1,42 @@
 # Changelog
 
+## 0.3.0 — circulation is a mode (2026-08-13)
+
+**Upgrading:** deploy the perception package *before* this version. The daemon
+now publishes `circulate` as a main mode, and the wire has to know how to send
+it; an old wire would hand the literal word to `climate.set_hvac_mode` and be
+rejected.
+
+- **BREAKING — new main mode `circulate`, and `off` narrowed to mean it.** A
+  mild day used to command `Off` and ask for the fan separately, on the
+  assumption that circulation was purely an output-side concern. That
+  assumption was false about the equipment: `off` stops the air handler too,
+  and the fan setting is only independent while the system runs. The house
+  spent mild days with dead air while the daemon believed it had asked for a
+  breeze - the setting was even visible on the device, sitting there ignored.
+  Circulation is now a mode. The thermostat has no fan-only mode either, so
+  layer 3 sends `circulate` as cooling at `CIRCULATE_SETPOINT` (30C), which
+  the compressor cannot reach. `Off` now means an empty house or a grid peak.
+- **The fan no longer keys off the mode.** It was forced on whenever the mode
+  was `Off`, which was both useless and backwards. David's rule, directly:
+  always on while home, on demand while away or during a peak.
+- **Circulation stands down when away or during a peak.** Unlike an idle
+  thermostat it costs blower power continuously, so an empty house and a grid
+  event both fall back to a true `Off`. `AwayReturning` keeps circulating, for
+  the same reason its setpoint cell holds the home target early.
+- **New optional input `sensor.homeostat_indoor_max_today`** - today's running
+  indoor maximum, reset at midnight. Drives the mild-day rescue: inside the
+  dead band, a house that has reached `RESCUE_COOL_AT_OR_ABOVE` (27C) cools on
+  the normal matrix (25C at home) instead of merely circulating. A *maximum*
+  rather than a reading, deliberately - it only climbs, so it is a latch that
+  needs no threshold to latch on, which keeps the rescue temperature in
+  `decide.rs` with every other policy temperature. The live reading would have
+  started the compressor at 27.0 and stopped it at 26.9. Missing reads as 0,
+  i.e. a day that never triggered the rescue.
+- **The rescue cannot reach a heating day** - the `Heat` arm returns before it
+  is consulted, so the same-day interlock is untouched. Its own test sweeps the
+  whole heating range with the rescue pinned on.
+
 ## 0.2.1 — two moving image tags (2026-08-12)
 
 No daemon changes; the binary is identical to 0.2.0. Only how images are

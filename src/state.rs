@@ -34,6 +34,14 @@ pub const ENTITY_RECOVERY_HORIZON: &str = "sensor.homeostat_recovery_horizon_min
 // giving the daemon a wall clock - see `back_during_recovery`. Optional:
 // missing/unknown reads as off (slept home), the comfort-safe default.
 pub const ENTITY_SLEPT_AWAY: &str = "binary_sensor.homeostat_slept_away";
+// Highest indoor temperature reached so far today (C), reset at midnight.
+// A running maximum rather than the current reading, because a maximum
+// only climbs: it is a latch that needs no threshold to latch on, which
+// is what keeps the rescue temperature in decide.rs where every other
+// temperature lives. Comparing the *current* reading there instead would
+// start the compressor at 27.0 and stop it at 26.9. Optional: missing
+// parses to 0.0, which is simply a day that never triggered the rescue.
+pub const ENTITY_INDOOR_MAX_TODAY: &str = "sensor.homeostat_indoor_max_today";
 
 /// What the occupancy sensor now publishes: presence facts only. The
 /// away_returning/away_far distinction moved out of perception - it is
@@ -185,14 +193,28 @@ impl EnergyPeriod {
 }
 
 /// Main-zone conditioning vocabulary, shared by the perception input
-/// (what the day demands - heat, cool, or nothing, derived here from the
-/// forecast) and the published decision (`desired_main_mode`: what to
-/// command). "Fan" is deliberately not a value here: circulation is an
-/// output-side concept (`desired_fan_mode`) that some houses don't have.
+/// (what the day demands, derived here from the forecast) and the
+/// published decision (`desired_main_mode`: what to command).
+///
+/// `Circulate` exists because of a wrong assumption this enum used to
+/// encode. It said circulation was purely output-side (`desired_fan_mode`)
+/// and that "fan" therefore did not belong here - so a mild day commanded
+/// `Off` with the fan asked for separately. On the TH6500WF (and, David
+/// reports, on the physical unit generally) the fan setting is only
+/// independent while the system is *not* off: `off` means the air handler
+/// too, and the fan setting sits there being ignored. The house spent mild
+/// days with dead air while the daemon believed it had asked for a breeze.
+///
+/// So circulation is a *mode*, not a fan setting. The device has no
+/// fan-only mode either - layer 3 expresses `Circulate` as cooling with a
+/// setpoint that cannot be reached (see `CIRCULATE_SETPOINT`), which is
+/// the same thing in device terms. `Off` remains, and now means what it
+/// says: nobody home, or a grid peak.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HvacMode {
     Heat,
     Cool,
+    Circulate,
     Off,
 }
 
@@ -201,6 +223,7 @@ impl HvacMode {
         match s {
             "heat" => Some(Self::Heat),
             "cool" => Some(Self::Cool),
+            "circulate" => Some(Self::Circulate),
             "off" => Some(Self::Off),
             _ => None,
         }
@@ -210,6 +233,7 @@ impl HvacMode {
         match self {
             Self::Heat => "heat",
             Self::Cool => "cool",
+            Self::Circulate => "circulate",
             Self::Off => "off",
         }
     }
@@ -254,6 +278,7 @@ pub struct RawInputs {
     /// (including unknown/unavailable) means "slept home" - the
     /// comfort-safe default that keeps the in-doubt preheat.
     slept_away: bool,
+    indoor_max_today: f64,
 }
 
 impl RawInputs {
@@ -282,6 +307,7 @@ impl RawInputs {
             ENTITY_RECOVERY_MINUTES => Self::set_f64(&mut self.recovery_min, state),
             ENTITY_RECOVERY_HORIZON => Self::set_f64(&mut self.recovery_horizon_min, state),
             ENTITY_SLEPT_AWAY => Self::set_flag(&mut self.slept_away, state),
+            ENTITY_INDOOR_MAX_TODAY => Self::set_f64(&mut self.indoor_max_today, state),
             _ => false,
         }
     }
@@ -332,7 +358,11 @@ impl RawInputs {
                 self.recovery_min,
             ),
             energy_period: self.energy_period?,
-            main_mode: crate::decide::demanded_mode(self.forecast_max?, self.main_mode_override),
+            main_mode: crate::decide::demanded_mode(
+                self.forecast_max?,
+                self.indoor_max_today,
+                self.main_mode_override,
+            ),
             aux_zone_occupied: self.aux_zone_occupied?,
             back_during_recovery: back_during_recovery(
                 self.recovery_horizon_min,
