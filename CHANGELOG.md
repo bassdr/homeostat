@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.2.1 — two moving image tags (2026-08-12)
+
+No daemon changes; the binary is identical to 0.2.0. Only how images are
+published moved.
+
+- **`:latest` now tracks `main`, `:stable` tracks releases.** Pushes to `main`
+  build an image (no GitHub release, no tarballs), so deploying no longer
+  requires inventing a version number first. `:stable` is the newest
+  non-prerelease tag — a `v0.3.0-rc1` publishes `:0.3.0-rc1` and nothing else,
+  reachable only by asking for it by name. Same relationship as
+  `nginx:stable` vs `nginx:latest`, or `node:lts` vs `node:latest`.
+  **Pin `:stable` if you want releases only**; `:latest` is unreleased code,
+  and it is what an untagged pull resolves to.
+
 ## 0.2.0 — perception contract change (2026-08-12)
 
 **Upgrading:** deploy the perception package *before* this version. The daemon
