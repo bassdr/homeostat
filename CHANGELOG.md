@@ -1,13 +1,44 @@
 # Changelog
 
-## 0.3.0 — circulation is a mode (2026-08-13)
+## 0.3.0 — a mode and a band (2026-08-13)
 
-**Upgrading:** deploy the perception package *before* this version. The daemon
-now publishes `circulate` as a main mode, and the wire has to know how to send
-it; an old wire would hand the literal word to `climate.set_hvac_mode` and be
-rejected.
+**Upgrading:** deploy the perception package *before* this version.
+`sensor.homeostat_desired_main_setpoint` is replaced by
+`sensor.homeostat_desired_heat_setpoint` and `..._cool_setpoint` (the old
+entity is retired via an empty retained discovery payload, so HA deletes it),
+and the combined state string gains a field. An old wire would read a setpoint
+that no longer exists.
 
-- **BREAKING — new main mode `circulate`, and `off` narrowed to mean it.** A
+- **BREAKING — every decision now carries a setpoint BAND, not one setpoint.**
+  `Desired` publishes `heat_setpoint` and `cool_setpoint`, always both, never
+  crossing, never narrower than `MIN_BAND_SPREAD` (5 °C). The daemon states an
+  intent *and* a band and does not assume what the equipment can do: a
+  `heat_cool` thermostat is handed the band and picks the direction itself,
+  while a thermostat without that mode uses the intent to choose which side to
+  command. Device capability now lives in exactly one template sensor in the
+  perception package, not in the daemon.
+- **The same-day heat/cool interlock is now a property of what we command.**
+  It used to be an argument about weather — "crossing both forecast thresholds
+  in one day would take a revision wider than any that occurs". That still
+  holds and keeps its test, but it only ever constrained the *mode*. The band
+  spread is checked directly on every reachable decision, believing nothing
+  about forecasts.
+- **A grid peak now sheds cooling too.** The `Cool` arm ignored
+  `energy_period` entirely, so a summer peak kept running the compressor while
+  `peak_sheds_all_loads` claimed otherwise. Both cooling arms now park the
+  ceiling during a peak. (There is still no pre-*cool* before a summer peak,
+  the mirror of the winter preheat.)
+- **The mild-day rescue is gone, and nothing was lost.** It needed a new
+  indoor-temperature input, a midnight-reset running maximum, and a written
+  argument about hysteresis. Publishing a band made it one number
+  (`MILD_COOL_CEILING`, 27 °C) — the thermostat supplies the hysteresis.
+  `sensor.homeostat_indoor_max_today` is no longer read.
+- **`Circulate` no longer downgrades to `Off` when away or during a peak.** An
+  empty house is a wide band (16/28) and a peak is wider (12/30); both leave
+  the device defending a limit on its own, which `off` does not. Same
+  principle the aux zone has always used. The blower question that downgrade
+  was really about belongs to `fan_mode`, which answers it independently.
+- **New main mode `circulate`, and `off` narrowed to mean it.** A
   mild day used to command `Off` and ask for the fan separately, on the
   assumption that circulation was purely an output-side concern. That
   assumption was false about the equipment: `off` stops the air handler too,
@@ -24,18 +55,10 @@ rejected.
   thermostat it costs blower power continuously, so an empty house and a grid
   event both fall back to a true `Off`. `AwayReturning` keeps circulating, for
   the same reason its setpoint cell holds the home target early.
-- **New optional input `sensor.homeostat_indoor_max_today`** - today's running
-  indoor maximum, reset at midnight. Drives the mild-day rescue: inside the
-  dead band, a house that has reached `RESCUE_COOL_AT_OR_ABOVE` (27C) cools on
-  the normal matrix (25C at home) instead of merely circulating. A *maximum*
-  rather than a reading, deliberately - it only climbs, so it is a latch that
-  needs no threshold to latch on, which keeps the rescue temperature in
-  `decide.rs` with every other policy temperature. The live reading would have
-  started the compressor at 27.0 and stopped it at 26.9. Missing reads as 0,
-  i.e. a day that never triggered the rescue.
-- **The rescue cannot reach a heating day** - the `Heat` arm returns before it
-  is consulted, so the same-day interlock is untouched. Its own test sweeps the
-  whole heating range with the rescue pinned on.
+- **The freeze-floor test got stronger.** The old single setpoint meant a
+  cooling target in `Cool` mode, so the ≥10 °C main-zone floor could not be
+  checked there. Every decision now carries a heating side, so every decision
+  is checked — `Cool` included.
 
 ## 0.2.1 — two moving image tags (2026-08-12)
 

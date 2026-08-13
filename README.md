@@ -79,9 +79,10 @@ Everything appears in HA automatically under one "Homeostat" device:
 
 | Entity | What it is |
 |---|---|
-| `sensor.homeostat_desired` | **the actuation contract**: `mode/setpoint/fan` as one string, with attributes `main_mode`, `main_setpoint`, `fan_mode`, `aux_zone_setpoint`, `shed_loads`, `inputs`. Its *single* state change is what your main-zone wire triggers on, so mode and setpoint always travel together |
-| `sensor.homeostat_desired_main_setpoint` | per-value view, °C — for history graphs |
-| `sensor.homeostat_desired_main_mode` | per-value view (`heat`/`cool`/`off`) |
+| `sensor.homeostat_desired` | **the actuation contract**: `mode/heat/cool/fan` as one string, with attributes `main_mode`, `heat_setpoint`, `cool_setpoint`, `fan_mode`, `aux_zone_setpoint`, `shed_loads`, `inputs`. Its *single* state change is what your main-zone wire triggers on, so the mode and the whole band always travel together |
+| `sensor.homeostat_desired_heat_setpoint` | per-value view, °C — for history graphs |
+| `sensor.homeostat_desired_cool_setpoint` | per-value view, °C — for history graphs |
+| `sensor.homeostat_desired_main_mode` | per-value view (`heat`/`cool`/`circulate`/`off`) — the *intent*. Equipment that can pick a direction itself (a `heat_cool` thermostat) can ignore it and take the band; equipment that cannot uses it to choose which side of the band to command. The daemon does not assume which kind it is talking to |
 | `sensor.homeostat_desired_fan_mode` | per-value view (`on`/`auto`) |
 | `sensor.homeostat_desired_aux_zone_setpoint` | secondary-zone target, °C — never `off`: zones with no comfort duty get a 5 °C frost floor (a setpoint persisted in the device defends the house even if the daemon and HA die) |
 | `binary_sensor.homeostat_desired_load_shed` | `on` = shed deferrable loads *now* (water heater, EV charging, whatever you wire to it) |
