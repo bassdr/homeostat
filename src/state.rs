@@ -34,14 +34,6 @@ pub const ENTITY_RECOVERY_HORIZON: &str = "sensor.homeostat_recovery_horizon_min
 // giving the daemon a wall clock - see `back_during_recovery`. Optional:
 // missing/unknown reads as off (slept home), the comfort-safe default.
 pub const ENTITY_SLEPT_AWAY: &str = "binary_sensor.homeostat_slept_away";
-// Highest indoor temperature reached so far today (C), reset at midnight.
-// A running maximum rather than the current reading, because a maximum
-// only climbs: it is a latch that needs no threshold to latch on, which
-// is what keeps the rescue temperature in decide.rs where every other
-// temperature lives. Comparing the *current* reading there instead would
-// start the compressor at 27.0 and stop it at 26.9. Optional: missing
-// parses to 0.0, which is simply a day that never triggered the rescue.
-pub const ENTITY_INDOOR_MAX_TODAY: &str = "sensor.homeostat_indoor_max_today";
 
 /// What the occupancy sensor now publishes: presence facts only. The
 /// away_returning/away_far distinction moved out of perception - it is
@@ -278,7 +270,6 @@ pub struct RawInputs {
     /// (including unknown/unavailable) means "slept home" - the
     /// comfort-safe default that keeps the in-doubt preheat.
     slept_away: bool,
-    indoor_max_today: f64,
 }
 
 impl RawInputs {
@@ -307,7 +298,6 @@ impl RawInputs {
             ENTITY_RECOVERY_MINUTES => Self::set_f64(&mut self.recovery_min, state),
             ENTITY_RECOVERY_HORIZON => Self::set_f64(&mut self.recovery_horizon_min, state),
             ENTITY_SLEPT_AWAY => Self::set_flag(&mut self.slept_away, state),
-            ENTITY_INDOOR_MAX_TODAY => Self::set_f64(&mut self.indoor_max_today, state),
             _ => false,
         }
     }
@@ -358,11 +348,7 @@ impl RawInputs {
                 self.recovery_min,
             ),
             energy_period: self.energy_period?,
-            main_mode: crate::decide::demanded_mode(
-                self.forecast_max?,
-                self.indoor_max_today,
-                self.main_mode_override,
-            ),
+            main_mode: crate::decide::demanded_mode(self.forecast_max?, self.main_mode_override),
             aux_zone_occupied: self.aux_zone_occupied?,
             back_during_recovery: back_during_recovery(
                 self.recovery_horizon_min,

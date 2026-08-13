@@ -21,7 +21,8 @@ use crate::state::Inputs;
 const TOPIC_STATUS: &str = "homeostat/status";
 const TOPIC_STATE: &str = "homeostat/desired/state";
 const TOPIC_ATTRS: &str = "homeostat/desired/attributes";
-const TOPIC_MAIN_SETPOINT: &str = "homeostat/desired/main_setpoint";
+const TOPIC_HEAT_SETPOINT: &str = "homeostat/desired/heat_setpoint";
+const TOPIC_COOL_SETPOINT: &str = "homeostat/desired/cool_setpoint";
 const TOPIC_MAIN_MODE: &str = "homeostat/desired/main_mode";
 const TOPIC_FAN_MODE: &str = "homeostat/desired/fan_mode";
 const TOPIC_AUX_SETPOINT: &str = "homeostat/desired/aux_zone_setpoint";
@@ -114,9 +115,18 @@ impl Mqtt {
             (
                 "sensor",
                 entity(
-                    "desired main setpoint",
-                    "homeostat_desired_main_setpoint",
-                    TOPIC_MAIN_SETPOINT,
+                    "desired heat setpoint",
+                    "homeostat_desired_heat_setpoint",
+                    TOPIC_HEAT_SETPOINT,
+                    temperature.clone(),
+                ),
+            ),
+            (
+                "sensor",
+                entity(
+                    "desired cool setpoint",
+                    "homeostat_desired_cool_setpoint",
+                    TOPIC_COOL_SETPOINT,
                     temperature.clone(),
                 ),
             ),
@@ -175,7 +185,10 @@ impl Mqtt {
 
         // Retired outputs: an empty retained payload on the old discovery
         // topic makes HA delete the entity (registry entry included).
-        for topic in ["homeassistant/binary_sensor/homeostat_desired_water_heater/config"] {
+        for topic in [
+            "homeassistant/binary_sensor/homeostat_desired_water_heater/config",
+            "homeassistant/sensor/homeostat_desired_main_setpoint/config",
+        ] {
             self.client
                 .publish(topic, QoS::AtLeastOnce, true, "")
                 .await?;
@@ -184,15 +197,19 @@ impl Mqtt {
     }
 
     pub async fn publish_desired(&self, desired: &Desired, inputs: &Inputs) -> Result<()> {
+        // the wires' atomic trigger: every value a wire needs, so a change
+        // to any of them fires it exactly once with all of them current
         let state = format!(
-            "{}/{}/{}",
+            "{}/{}/{}/{}",
             desired.main_mode.as_str(),
-            desired.main_setpoint,
+            desired.heat_setpoint,
+            desired.cool_setpoint,
             desired.fan_mode.as_str()
         );
         let attrs = json!({
             "main_mode": desired.main_mode.as_str(),
-            "main_setpoint": desired.main_setpoint,
+            "heat_setpoint": desired.heat_setpoint,
+            "cool_setpoint": desired.cool_setpoint,
             "fan_mode": desired.fan_mode.as_str(),
             "aux_zone_setpoint": desired.aux_zone_setpoint,
             "shed_loads": if desired.shed_loads { "on" } else { "off" },
@@ -203,7 +220,8 @@ impl Mqtt {
         // per-value topics first, the combined state last: by the time the
         // main wire fires on the combined change, every value is current
         for (topic, payload) in [
-            (TOPIC_MAIN_SETPOINT, desired.main_setpoint.to_string()),
+            (TOPIC_HEAT_SETPOINT, desired.heat_setpoint.to_string()),
+            (TOPIC_COOL_SETPOINT, desired.cool_setpoint.to_string()),
             (TOPIC_MAIN_MODE, desired.main_mode.as_str().to_owned()),
             (TOPIC_FAN_MODE, desired.fan_mode.as_str().to_owned()),
             (TOPIC_AUX_SETPOINT, desired.aux_zone_setpoint.to_string()),
