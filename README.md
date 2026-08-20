@@ -8,10 +8,12 @@ via MQTT discovery. It never touches your devices: thin "wire" automations
 on the HA side forward its decisions to your actual hardware, and the daemon
 contains zero physical entity IDs.
 
-> **Status: early.** This currently runs (in shadow mode) in exactly one
-> house, the author's — and it does not fully work there yet either. Expect
-> the contract below to change without notice. If you try it anyway, you are
-> the second user ever; issues welcome.
+> **Status: it works, in exactly one house.** It runs live in the author's —
+> gate open, daemon driving the equipment — and has held through a cooling
+> season, a multi-day absence and a return trip. It still has one user, so
+> expect the contract below to change. What is verified and what is knowingly
+> left undone are both in [docs/status.md](docs/status.md). If you try it, you
+> are the second user ever; issues welcome.
 
 ## Running it
 
