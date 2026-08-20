@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.3.0 — a mode and a band (2026-08-13)
+## 0.3.0 — a mode and a band (2026-08-20)
 
 **Upgrading:** deploy the perception package *before* this version.
 `sensor.homeostat_desired_main_setpoint` is replaced by
@@ -18,11 +18,10 @@ that no longer exists.
   command. Device capability now lives in exactly one template sensor in the
   perception package, not in the daemon.
 - **The same-day heat/cool interlock is now a property of what we command.**
-  It used to be an argument about weather — "crossing both forecast thresholds
-  in one day would take a revision wider than any that occurs". That still
-  holds and keeps its test, but it only ever constrained the *mode*. The band
-  spread is checked directly on every reachable decision, believing nothing
-  about forecasts.
+  The band spread is checked directly on every reachable decision, believing
+  nothing about the weather. The older argument — that crossing both forecast
+  thresholds in one day would take a revision wider than any that occurs —
+  still holds and keeps its test, but it only ever constrained the *mode*.
 - **A grid peak now sheds cooling too.** The `Cool` arm ignored
   `energy_period` entirely, so a summer peak kept running the compressor while
   `peak_sheds_all_loads` claimed otherwise. Both cooling arms now park the
@@ -38,23 +37,18 @@ that no longer exists.
   the device defending a limit on its own, which `off` does not. Same
   principle the aux zone has always used. The blower question that downgrade
   was really about belongs to `fan_mode`, which answers it independently.
-- **New main mode `circulate`, and `off` narrowed to mean it.** A
-  mild day used to command `Off` and ask for the fan separately, on the
-  assumption that circulation was purely an output-side concern. That
-  assumption was false about the equipment: `off` stops the air handler too,
-  and the fan setting is only independent while the system runs. The house
-  spent mild days with dead air while the daemon believed it had asked for a
-  breeze - the setting was even visible on the device, sitting there ignored.
-  Circulation is now a mode. The thermostat has no fan-only mode either, so
-  layer 3 sends `circulate` as cooling at `CIRCULATE_SETPOINT` (30C), which
-  the compressor cannot reach. `Off` now means an empty house or a grid peak.
+- **New main mode `circulate`, and `off` narrowed accordingly.** A mild day
+  used to command `Off` and ask for the fan separately, on the assumption that
+  circulation was purely an output-side concern. That assumption was false
+  about the equipment: `off` stops the air handler too, and the fan setting is
+  only independent while the system runs. The house spent mild days with dead
+  air while the daemon believed it had asked for a breeze — the setting was
+  even visible on the device, sitting there ignored. Circulation is now a
+  mode, carried by a band wide enough that neither side of the equipment is
+  asked to run. `Off` is now reachable only through the override knob.
 - **The fan no longer keys off the mode.** It was forced on whenever the mode
-  was `Off`, which was both useless and backwards. David's rule, directly:
-  always on while home, on demand while away or during a peak.
-- **Circulation stands down when away or during a peak.** Unlike an idle
-  thermostat it costs blower power continuously, so an empty house and a grid
-  event both fall back to a true `Off`. `AwayReturning` keeps circulating, for
-  the same reason its setpoint cell holds the home target early.
+  was `Off`, which was both useless and backwards. The rule is now stated
+  directly: always on while home, on demand while away or during a peak.
 - **The freeze-floor test got stronger.** The old single setpoint meant a
   cooling target in `Cool` mode, so the ≥10 °C main-zone floor could not be
   checked there. Every decision now carries a heating side, so every decision
