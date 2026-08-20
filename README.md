@@ -117,6 +117,10 @@ incident in `src/decide.rs`.
   decisions against your existing setup for as long as you like before
   anything moves.
 
+[docs/status.md](docs/status.md) records where this stands in the one house it
+runs in: what has been verified live, and — more usefully — what is knowingly
+left undone, with the trigger that would justify picking each item up.
+
 ## Build & develop
 
 ```bash
