@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.3.1 — a mild day is not a cold house (2026-10-28)
+
+No contract change: same entities, same perception package.
+
+- **The parked heat floor now depends on who is home.** On a day that does
+  not demand heating (`Circulate`, and `Cool`), the heat side of the band was
+  16 °C whatever the occupancy. A 17 °C forecast high on 2026-10-28 left the
+  house drifting to 18.5 °C with David home. It is now 20 °C home, asleep or
+  returning (19 °C asleep on a cool day, where the 24 °C ceiling leaves no
+  room for 20), 17 °C away, and still 16 °C away-far and during a peak.
+  The forecast thresholds are unchanged: a mild day still skips comfort
+  heating; it just no longer leaves an occupied house cold.
+
 ## 0.3.0 — a mode and a band (2026-08-20)
 
 **Upgrading:** deploy the perception package *before* this version.

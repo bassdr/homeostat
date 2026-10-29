@@ -35,6 +35,21 @@ const COOL_AT_OR_ABOVE: f64 = 25.0;
 const IDLE_COOL_CEILING: f64 = 30.0;
 const IDLE_HEAT_FLOOR: f64 = 16.0;
 
+/// The parked heat side when someone is in the house (or about to be) on a
+/// day that does not demand heating. Not comfort - the mode decided against
+/// that - but a house nobody should come home to. A mild-day high says
+/// nothing about the evening: on 2026-10-28 a 17C high left the house to
+/// drift from 19C to 18.5C under a 16C floor while David was there. The
+/// thresholds this floor sits beside were dead code in the automation the
+/// daemon replaced (it read a sensor that never existed and always ran
+/// heat_cool), so no mild day had ever actually been left at 16C before.
+const LIVABLE_HEAT_FLOOR: f64 = 20.0;
+
+/// The parked heat side for a plain absence: a little above the deep floor
+/// so the return is not a full recovery. A far absence and a grid peak keep
+/// `IDLE_HEAT_FLOOR`.
+const AWAY_HEAT_FLOOR: f64 = 17.0;
+
 /// The cool ceiling on a mild day: high enough that 26C with air moving is
 /// left alone (David: "26 is OK if the fan is ON"), low enough that the
 /// house does not become unbearable when the forecast was wrong about how
@@ -166,7 +181,7 @@ pub fn decide(i: &Inputs) -> Desired {
         // "rescue": if the forecast was wrong about the day, cooling
         // starts on its own without any latch to arrange it.
         Circulate => (
-            IDLE_HEAT_FLOOR,
+            parked_heat_floor(i.energy_period, i.occupancy),
             match (i.energy_period, i.occupancy) {
                 (Peak, _) => IDLE_COOL_CEILING,
                 (_, Home | HomeAsleep | AwayReturning) => MILD_COOL_CEILING,
@@ -174,7 +189,12 @@ pub fn decide(i: &Inputs) -> Desired {
             },
         ),
         Cool => (
-            IDLE_HEAT_FLOOR,
+            match (i.energy_period, i.occupancy) {
+                // the asleep ceiling is 24C; 20C under it would be a 4C
+                // band, narrower than MIN_BAND_SPREAD
+                (Normal | Preheat, HomeAsleep) => 19.0,
+                (period, occupancy) => parked_heat_floor(period, occupancy),
+            },
             match (i.energy_period, i.occupancy) {
                 // A grid peak sheds in both directions. The heating arm has
                 // always done this (its Peak row falls to 16/12/10); the
@@ -287,6 +307,21 @@ pub fn decide(i: &Inputs) -> Desired {
         fan_mode,
         aux_zone_setpoint,
         shed_loads: i.energy_period == Peak,
+    }
+}
+
+/// The heat side of a band whose mode is not heating: a defended limit,
+/// not a comfort target. A peak sheds to the idle floor whoever is home,
+/// as the heating arm's Peak row does.
+fn parked_heat_floor(energy_period: EnergyPeriod, occupancy: Occupancy) -> f64 {
+    use EnergyPeriod::*;
+    use Occupancy::*;
+
+    match (energy_period, occupancy) {
+        (Peak, _) => IDLE_HEAT_FLOOR,
+        (_, Home | HomeAsleep | AwayReturning) => LIVABLE_HEAT_FLOOR,
+        (_, Away) => AWAY_HEAT_FLOOR,
+        (_, AwayFar) => IDLE_HEAT_FLOOR,
     }
 }
 
@@ -567,8 +602,42 @@ mod tests {
         assert_eq!(d.fan_mode, FanMode::On);
         assert_eq!(
             (d.heat_setpoint, d.cool_setpoint),
-            (IDLE_HEAT_FLOOR, MILD_COOL_CEILING),
+            (LIVABLE_HEAT_FLOOR, MILD_COOL_CEILING),
             "a mild day is a wide band, not a forced direction"
+        );
+    }
+
+    /// 2026-10-28: a 17C forecast high made the day mild, and the house
+    /// drifted to 18.5C under a 16C floor with David home. A mild day may
+    /// skip comfort heating; it may not leave an occupied house cold.
+    #[test]
+    fn a_mild_evening_at_home_never_drifts_below_livable() {
+        use EnergyPeriod::*;
+        use HvacMode::*;
+        use Occupancy::*;
+
+        for main_mode in [Circulate, Cool] {
+            for energy_period in [Normal, Preheat] {
+                for occupancy in [Home, HomeAsleep, AwayReturning] {
+                    let d = decide(&inputs(occupancy, energy_period, main_mode));
+                    assert!(
+                        d.heat_setpoint >= 19.0,
+                        "{main_mode:?}/{energy_period:?}/{occupancy:?} parks heat at {}",
+                        d.heat_setpoint
+                    );
+                }
+            }
+        }
+
+        let floor = |o| decide(&inputs(o, Normal, Circulate)).heat_setpoint;
+        assert_eq!(floor(Home), LIVABLE_HEAT_FLOOR);
+        assert_eq!(floor(AwayReturning), LIVABLE_HEAT_FLOOR, "warm on arrival");
+        assert_eq!(floor(Away), AWAY_HEAT_FLOOR);
+        assert_eq!(floor(AwayFar), IDLE_HEAT_FLOOR);
+        assert_eq!(
+            decide(&inputs(Home, Peak, Circulate)).heat_setpoint,
+            IDLE_HEAT_FLOOR,
+            "a peak still sheds to the idle floor"
         );
     }
 
@@ -581,10 +650,10 @@ mod tests {
         use EnergyPeriod::*;
         use Occupancy::*;
 
-        for occupancy in [Away, AwayFar] {
+        for (occupancy, floor) in [(Away, AWAY_HEAT_FLOOR), (AwayFar, IDLE_HEAT_FLOOR)] {
             let d = decide(&inputs(occupancy, Normal, HvacMode::Circulate));
             assert_eq!(d.main_mode, HvacMode::Circulate, "intent is unchanged");
-            assert_eq!((d.heat_setpoint, d.cool_setpoint), (IDLE_HEAT_FLOOR, 28.0));
+            assert_eq!((d.heat_setpoint, d.cool_setpoint), (floor, 28.0));
             assert_eq!(d.fan_mode, FanMode::Auto, "no blower for an empty house");
         }
 
