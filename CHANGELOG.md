@@ -1,5 +1,32 @@
 # Changelog
 
+## 0.4.0 — warm on arrival, not merely livable (2026-11-03)
+
+**Upgrading:** deploy the perception package together with this version.
+`sensor.homeostat_recovery_minutes` is replaced by two facts,
+`sensor.homeostat_main_temperature` (°C) and `sensor.homeostat_recovery_rate`
+(°C/h). Either half on its own degrades to the plain 20-minute pre-start (both
+inputs are optional), so the order only matters for how long a cold-house
+return goes without its stretched lead.
+
+- **The returning lead now aims at comfort.** It used to be the time to warm
+  the house back to a livable 19 °C, so a house sitting at the 19 °C away
+  setback got only the plain 20-minute pre-start, and an arrival from a
+  mild-day drift (20.3 °C on 2026-11-03) walked into 22.0 °C instead of 22.5.
+  The lead is now the time to reach what the matrix commands for a return —
+  22.5 °C on a normal heating day — at the measured sustained rate: about
+  2.5 h from 19 °C, so in practice the warm-up starts the moment the return is
+  known.
+- **The target comes from the matrix, not from perception.** The daemon asks
+  `decide()` what a return would command under the current conditions
+  (`returning_heat_setpoint`), so changing a returning cell moves the lead
+  with it. A return during a peak commands the shed floor (13 °C) and so never
+  starts an early warm-up; ahead of a peak it aims at the preheat target. The
+  19 °C that used to sit in the perception template was one of the policy
+  temperatures `where-policy-lives.md` listed as living in the wrong layer.
+- Cooling keeps the plain 20-minute pre-start: there is no cool-down rate to
+  plan with, and a hot house is above every heat target.
+
 ## 0.3.1 — a mild day is not a cold house (2026-10-28)
 
 No contract change: same entities, same perception package.

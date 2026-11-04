@@ -42,10 +42,13 @@ not hand the daemon a fact about the weather; it hands over a verdict:
 the system, since they decide whether the house conditions at all and in
 which direction. `decide.rs` never sees them.
 
-A second, smaller violation: `homeostat_recovery_minutes` embeds the model
-`(19 - t) * 60 / rate`. The `19` is a policy temperature ("livable"), and the
-outdoor-temperature slope is a fitted model. Both are decisions wearing the
-costume of a conversion.
+A second, smaller violation: `homeostat_recovery_minutes` embedded the model
+`(19 - t) * 60 / rate`. The `19` was a policy temperature ("livable"), and the
+outdoor-temperature slope is a fitted model. Both were decisions wearing the
+costume of a conversion. (Fixed in 0.4.0: perception now hands over the
+temperature and the rate, and the daemon divides the distance to its own
+returning target. The fitted slope stays in perception, next to the knob it is
+tuned with.)
 
 ## Why that specific placement caused the incident
 

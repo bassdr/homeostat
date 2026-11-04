@@ -22,7 +22,15 @@ pub const ENTITY_AUX_ZONE_OCCUPIED: &str = "binary_sensor.homeostat_aux_zone_occ
 // matrix decision and the held value lives in HA only, as a record.
 pub const ENTITY_RETURN_ETA: &str = "sensor.homeostat_return_eta";
 pub const ENTITY_RETURN_FLOOR: &str = "sensor.homeostat_return_floor";
-pub const ENTITY_RECOVERY_MINUTES: &str = "sensor.homeostat_recovery_minutes";
+// The returning lead is the time to warm the house to what a return would
+// command, so it needs where the house is and how fast it warms. Both are
+// facts, measured in HA: the main zone's current temperature (C), and the
+// sustained recovery rate (C/h, the fitted outdoor-temperature model lives in
+// the perception package with its live-tunable knob). The target is not
+// theirs to choose - it is the matrix's (`decide::returning_heat_setpoint`).
+// Optional: either missing leaves the plain comfort pre-start.
+pub const ENTITY_MAIN_TEMPERATURE: &str = "sensor.homeostat_main_temperature";
+pub const ENTITY_RECOVERY_RATE: &str = "sensor.homeostat_recovery_rate";
 // Minutes from now until the recovery horizon (grid peak end + the recovery
 // window). Perception does the clock conversion (like return_eta); the daemon
 // owns the "is someone back before then" policy - see `back_during_recovery`.
@@ -58,11 +66,33 @@ impl Presence {
     }
 }
 
-/// Minutes-until-return below which an away house is treated as "returning".
-/// This is the comfort pre-start (heater/cooler on ~20 min before arrival;
-/// finishing the warm-up while home is acceptable). From a cold house the
-/// lead is stretched by the recovery estimate instead - see `derive`.
+/// Minutes-until-return below which an away house is always treated as
+/// "returning": the minimum pre-start, and the whole of it for cooling and
+/// whenever the house's temperature or recovery rate is unknown. A house
+/// further from the returning target stretches the lead to the time it
+/// needs to get there - see `recovery_minutes` and `derive`.
 const RETURNING_LEAD_MIN: f64 = 20.0;
+
+/// Minutes to warm the main zone from `current` to `target` at `rate_c_per_h`,
+/// rounded up to 5 min (the same hysteresis step as the return estimates, so
+/// a temperature reading moving by a tenth does not flap the buckets).
+/// 0 when the house is already there, or when either fact is unknown - the
+/// plain comfort pre-start then applies.
+///
+/// It shrinks as the house warms, by a minute per minute at exactly the
+/// assumed rate. The rate is the conservative sustained one, so a warm-up
+/// that runs ahead of it can fall back out of `AwayReturning` until the
+/// arrival catches up: the model saying, correctly, that it would still make
+/// it from here. At worst that is one extra stop/start of the equipment per
+/// return.
+pub fn recovery_minutes(current: Option<f64>, rate_c_per_h: Option<f64>, target: f64) -> f64 {
+    match (current, rate_c_per_h) {
+        (Some(current), Some(rate)) if rate > 0.0 && current < target => {
+            ((target - current) * 60.0 / rate / 5.0).ceil() * 5.0
+        }
+        _ => 0.0,
+    }
+}
 /// Minutes-until-return at or beyond which the deep away_far setback
 /// applies ("cannot be back within a couple of hours"). Note: from the
 /// distance floor alone (100 km/h assumed) this kicks in at ~200 km,
@@ -94,14 +124,16 @@ impl Occupancy {
     /// means "could be nearby" (20 min from the girlfriend's couch), never
     /// "is coming back".
     ///
-    /// `recovery_min` is how long the house needs to warm back to *livable*
-    /// (not full comfort) from its current temperature (perception
-    /// estimates it; 0 = warm enough or unknown). It stretches the
-    /// returning lead: from a deep-cold cycle (12C after a shed peak)
-    /// recovery takes hours, and arriving anywhere inside that window to a
-    /// cold house is a comfort failure - so the returning check runs first
-    /// and outranks Far. From the normal 19C away baseline it contributes
-    /// nothing and the plain comfort pre-start applies.
+    /// `recovery_min` is how long the house needs to warm to what a return
+    /// commands - full comfort, 22.5C on a normal heating day - from its
+    /// current temperature (`recovery_minutes`; 0 = already there or
+    /// unknown). It stretches the returning lead so the house is *at* the
+    /// target on arrival rather than starting toward it: from the 19C away
+    /// baseline that is a couple of hours at winter rates, and from a
+    /// deep-cold cycle (12C after a shed peak) many more - so the returning
+    /// check runs first and outranks Far. In practice the estimate only
+    /// exists once someone is heading home, so a long lead means "start the
+    /// moment the return is known".
     pub fn derive(
         presence: Presence,
         return_eta_min: f64,
@@ -264,8 +296,12 @@ pub struct RawInputs {
     /// decisions.
     return_eta_min: f64,
     return_floor_min: f64,
-    recovery_min: f64,
     recovery_horizon_min: f64,
+    /// Option, unlike the minutes above: 0C is a real temperature, so
+    /// "unknown" cannot be spelled 0. Optional all the same - None only
+    /// drops the lead back to the plain pre-start.
+    main_temperature: Option<f64>,
+    recovery_rate: Option<f64>,
     /// Plain bool for the same reason: optional, and anything but "on"
     /// (including unknown/unavailable) means "slept home" - the
     /// comfort-safe default that keeps the in-doubt preheat.
@@ -295,7 +331,8 @@ impl RawInputs {
             ),
             ENTITY_RETURN_ETA => Self::set_f64(&mut self.return_eta_min, state),
             ENTITY_RETURN_FLOOR => Self::set_f64(&mut self.return_floor_min, state),
-            ENTITY_RECOVERY_MINUTES => Self::set_f64(&mut self.recovery_min, state),
+            ENTITY_MAIN_TEMPERATURE => Self::set(&mut self.main_temperature, state.parse().ok()),
+            ENTITY_RECOVERY_RATE => Self::set(&mut self.recovery_rate, state.parse().ok()),
             ENTITY_RECOVERY_HORIZON => Self::set_f64(&mut self.recovery_horizon_min, state),
             ENTITY_SLEPT_AWAY => Self::set_flag(&mut self.slept_away, state),
             _ => false,
@@ -340,22 +377,33 @@ impl RawInputs {
     }
 
     pub fn complete(&self) -> Option<Inputs> {
+        let presence = self.presence?;
+        let energy_period = self.energy_period?;
+        let main_mode = crate::decide::demanded_mode(self.forecast_max?, self.main_mode_override);
+        let aux_zone_occupied = self.aux_zone_occupied?;
+        let back_during_recovery = back_during_recovery(
+            self.recovery_horizon_min,
+            self.return_eta_min,
+            self.return_floor_min,
+            self.slept_away,
+        );
+        let target = crate::decide::returning_heat_setpoint(
+            main_mode,
+            energy_period,
+            aux_zone_occupied,
+            back_during_recovery,
+        );
         Some(Inputs {
             occupancy: Occupancy::derive(
-                self.presence?,
+                presence,
                 self.return_eta_min,
                 self.return_floor_min,
-                self.recovery_min,
+                recovery_minutes(self.main_temperature, self.recovery_rate, target),
             ),
-            energy_period: self.energy_period?,
-            main_mode: crate::decide::demanded_mode(self.forecast_max?, self.main_mode_override),
-            aux_zone_occupied: self.aux_zone_occupied?,
-            back_during_recovery: back_during_recovery(
-                self.recovery_horizon_min,
-                self.return_eta_min,
-                self.return_floor_min,
-                self.slept_away,
-            ),
+            energy_period,
+            main_mode,
+            aux_zone_occupied,
+            back_during_recovery,
         })
     }
 }
@@ -503,11 +551,42 @@ mod tests {
         raw.ingest(ENTITY_AUX_ZONE_OCCUPIED, "off");
         raw.ingest(ENTITY_RETURN_ETA, "unavailable");
         raw.ingest(ENTITY_RETURN_FLOOR, "unknown");
-        raw.ingest(ENTITY_RECOVERY_MINUTES, "unavailable");
+        raw.ingest(ENTITY_MAIN_TEMPERATURE, "unavailable");
+        raw.ingest(ENTITY_RECOVERY_RATE, "unknown");
         let inputs = raw
             .complete()
             .expect("optional inputs must not suspend decisions");
         assert_eq!(inputs.occupancy, Occupancy::Away, "no data = conservative");
+    }
+
+    #[test]
+    fn recovery_minutes_is_the_time_to_the_target_at_the_measured_rate() {
+        // 19C away baseline -> 22.5C at 1.4C/h: 150 min exactly
+        assert_eq!(recovery_minutes(Some(19.0), Some(1.4), 22.5), 150.0);
+        // rounded up to the 5-min step: 2026-11-03, 20.3C -> 94.3 -> 95
+        assert_eq!(recovery_minutes(Some(20.3), Some(1.4), 22.5), 95.0);
+        // at or above the target: nothing to recover
+        assert_eq!(recovery_minutes(Some(22.5), Some(1.4), 22.5), 0.0);
+        assert_eq!(recovery_minutes(Some(27.0), Some(1.4), 20.0), 0.0);
+        // either fact unknown, or a nonsensical rate: no stretch
+        assert_eq!(recovery_minutes(None, Some(1.4), 22.5), 0.0);
+        assert_eq!(recovery_minutes(Some(19.0), None, 22.5), 0.0);
+        assert_eq!(recovery_minutes(Some(19.0), Some(0.0), 22.5), 0.0);
+        assert_eq!(recovery_minutes(Some(19.0), Some(-1.0), 22.5), 0.0);
+    }
+
+    /// 0C is a temperature, not "unknown": the optional-minutes convention
+    /// (unparseable = 0) must not leak into the temperature slot.
+    #[test]
+    fn a_freezing_house_is_a_reading_not_a_missing_one() {
+        let mut raw = RawInputs::default();
+        raw.ingest(ENTITY_MAIN_TEMPERATURE, "0");
+        raw.ingest(ENTITY_RECOVERY_RATE, "1.0");
+        assert_eq!(raw.main_temperature, Some(0.0));
+        assert_eq!(
+            recovery_minutes(raw.main_temperature, raw.recovery_rate, 22.5),
+            1350.0
+        );
     }
 
     #[test]

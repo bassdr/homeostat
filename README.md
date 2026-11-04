@@ -55,7 +55,8 @@ with dummy source names is in
 | `binary_sensor.homeostat_aux_zone_occupied` | `on`/`off` | secondary zone (e.g. basement) in use |
 | `sensor.homeostat_return_eta` | minutes, `0` = no estimate | credible time-until-someone-is-home (nav, calendar, manual) |
 | `sensor.homeostat_return_floor` | minutes, `0` = vacuous | earliest *possible* arrival (travel time / distance) — a lower bound, always true |
-| `sensor.homeostat_recovery_minutes` | minutes, `0` = warm enough | time to reheat the house to livable from its current temperature |
+| `sensor.homeostat_main_temperature` | °C | the main zone's current temperature |
+| `sensor.homeostat_recovery_rate` | °C/h | how fast the house warms right now (measured, sustained; usually corrected for outdoor temperature). With the temperature, the daemon works out how long the house needs to reach what a return commands, and starts the return that much ahead |
 | `sensor.homeostat_recovery_horizon_minutes` | minutes, `0` = no grid event | minutes from now until the grid peak ends plus your recovery window; the daemon compares the return estimates against it to gate the away preheat boost |
 | `binary_sensor.homeostat_slept_away` | `on`/`off` | nobody was home overnight (latch at deep night, clear on arrival). With no return evidence the daemon assumes nobody shows up during a grid event — this is what makes a morning peak skippable while an evening peak still preheats, without giving the daemon a wall clock |
 

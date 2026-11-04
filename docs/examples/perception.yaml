@@ -19,7 +19,8 @@
 #   binary_sensor.homeostat_aux_zone_occupied
 #   sensor.homeostat_return_eta         minutes; 0 = no estimate
 #   sensor.homeostat_return_floor       minutes; 0 = vacuous
-#   sensor.homeostat_recovery_minutes   minutes; 0 = warm enough
+#   sensor.homeostat_main_temperature   C, the main zone's current reading
+#   sensor.homeostat_recovery_rate      C/h, sustained warm-up rate now
 #   sensor.homeostat_recovery_horizon_minutes  minutes; 0 = no grid event
 #   binary_sensor.homeostat_slept_away  on = nobody was home overnight
 # Everything else below is intermediate plumbing that computes those.
@@ -58,7 +59,7 @@ input_number:
     # how fast your heating actually warms the whole house, MEASURED, in
     # C/h. Pull it from your temperature history: sustained multi-hour
     # recovery episodes, not short bursts. This is the 0C intercept; the
-    # outdoor-temperature slope lives in the recovery_minutes template.
+    # outdoor-temperature slope lives in the recovery_rate template.
     # Overestimating means arriving to a cold house.
     min: 0.5
     max: 4.5
@@ -349,20 +350,30 @@ template:
               none
             {% endif %}
 
-      - name: homeostat_recovery_minutes
-        unique_id: homeostat_recovery_minutes
-        unit_of_measurement: min
+      - name: homeostat_main_temperature
+        unique_id: homeostat_main_temperature
+        unit_of_measurement: °C
+        device_class: temperature
         state_class: measurement
-        # time to reheat the main zone to livable (19C here) from its current
-        # temperature, at your measured rate corrected for outdoor
-        # temperature. Stretches the daemon's returning lead so an arrival
-        # never lands in a cold post-peak house. Warm house (>= 19C) = 0.
+        availability: >
+          {{ state_attr('climate.your_main_hvac', 'current_temperature') is number }}
         state: >
-          {% set t = state_attr('climate.your_main_hvac', 'current_temperature') | float(19) %}
+          {{ state_attr('climate.your_main_hvac', 'current_temperature') | round(1) }}
+
+      - name: homeostat_recovery_rate
+        unique_id: homeostat_recovery_rate
+        unit_of_measurement: °C/h
+        state_class: measurement
+        # how fast the house warms right now: your measured rate corrected
+        # for outdoor temperature. The daemon divides the distance to what a
+        # return commands (full comfort, not merely livable) by this to get
+        # its returning lead, so the house is at the target on arrival.
+        # Keep it conservative: underestimating only starts the warm-up
+        # early, overestimating means arriving to a cold house.
+        state: >
           {% set t_out = states('sensor.your_outdoor_temperature') | float(0) %}
-          {% set rate = [states('input_number.homeostat_recovery_rate') | float(1.5)
-                         + 0.015 * t_out, 0.8] | max %}
-          {{ ([(19 - t) * 60 / rate, 0] | max / 5) | round(0, 'ceil') * 5 }}
+          {{ ([states('input_number.homeostat_recovery_rate') | float(1.5)
+               + 0.015 * t_out, 0.8] | max) | round(2) }}
 
       - name: homeostat_energy_period
         unique_id: homeostat_energy_period

@@ -310,6 +310,28 @@ pub fn decide(i: &Inputs) -> Desired {
     }
 }
 
+/// What a return in progress commands on the heat side, under the given
+/// conditions: the temperature the house should be *at* when someone walks
+/// in. The returning lead is the time to reach it (`state::recovery_minutes`),
+/// so the lead follows the matrix instead of restating a number - 22.5C on a
+/// normal heating day, 25C ahead of a peak, and only 13C during one, which
+/// is what keeps a return during a peak from starting an early warm-up.
+pub fn returning_heat_setpoint(
+    main_mode: HvacMode,
+    energy_period: EnergyPeriod,
+    aux_zone_occupied: bool,
+    back_during_recovery: bool,
+) -> f64 {
+    decide(&Inputs {
+        occupancy: Occupancy::AwayReturning,
+        energy_period,
+        main_mode,
+        aux_zone_occupied,
+        back_during_recovery,
+    })
+    .heat_setpoint
+}
+
 /// The heat side of a band whose mode is not heating: a defended limit,
 /// not a comfort target. A peak sheds to the idle floor whoever is home,
 /// as the heating arm's Peak row does.
@@ -694,17 +716,22 @@ mod tests {
     fn returning_home_scenarios() {
         use crate::state::{
             RawInputs, ENTITY_AUX_ZONE_OCCUPIED, ENTITY_ENERGY_PERIOD, ENTITY_FORECAST_MAX,
-            ENTITY_OCCUPANCY, ENTITY_RECOVERY_HORIZON, ENTITY_RECOVERY_MINUTES, ENTITY_RETURN_ETA,
-            ENTITY_RETURN_FLOOR, ENTITY_SLEPT_AWAY,
+            ENTITY_MAIN_TEMPERATURE, ENTITY_OCCUPANCY, ENTITY_RECOVERY_HORIZON,
+            ENTITY_RECOVERY_RATE, ENTITY_RETURN_ETA, ENTITY_RETURN_FLOOR, ENTITY_SLEPT_AWAY,
         };
 
         /// Representative forecast highs either side of the dead band, so
         /// these scenarios read as seasons rather than as numbers.
         const WINTER_DAY: f64 = -5.0;
         const SUMMER_DAY: f64 = 30.0;
+        /// The away baseline a winter house sits at, and the measured
+        /// sustained recovery rate near 0C outside (winter 2025-26 fit).
+        const AWAY_BASELINE: f64 = 19.0;
+        const RATE: f64 = 1.4;
 
         // occupancy, period, forecast high, return_eta, return_floor,
-        // recovery, recovery_horizon (minutes), slept_away -> decided Inputs
+        // indoor temperature (C), recovery_horizon (minutes), slept_away
+        // -> decided Inputs
         #[allow(clippy::too_many_arguments)]
         fn perceive(
             occ: &str,
@@ -712,7 +739,7 @@ mod tests {
             forecast_max: f64,
             eta: f64,
             floor: f64,
-            recovery: f64,
+            indoor: f64,
             horizon: f64,
             slept_away: &str,
         ) -> Inputs {
@@ -723,42 +750,150 @@ mod tests {
             raw.ingest(ENTITY_AUX_ZONE_OCCUPIED, "off");
             raw.ingest(ENTITY_RETURN_ETA, &eta.to_string());
             raw.ingest(ENTITY_RETURN_FLOOR, &floor.to_string());
-            raw.ingest(ENTITY_RECOVERY_MINUTES, &recovery.to_string());
+            raw.ingest(ENTITY_MAIN_TEMPERATURE, &indoor.to_string());
+            raw.ingest(ENTITY_RECOVERY_RATE, &RATE.to_string());
             raw.ingest(ENTITY_RECOVERY_HORIZON, &horizon.to_string());
             raw.ingest(ENTITY_SLEPT_AWAY, slept_away);
             raw.complete().expect("optional inputs never suspend")
         }
 
-        // Case 1 - Winter, heading home, NO peak. Heading home 20 min out
-        // (return_eta = floor = 20), warm baseline (recovery 0), no grid
-        // event (horizon 0). The 20-min comfort pre-start: returning gets the
-        // full home target early, not the away setback.
-        let i = perceive("away", "normal", WINTER_DAY, 20.0, 20.0, 0.0, 0.0, "off");
+        // Case 1 - Winter, heading home, NO peak, from the 19C away
+        // baseline. 22.5 is 150 min away at the measured rate, so the
+        // return starts as soon as it is known: a 45-min drive gets the
+        // home target from the moment it starts, not 20 min before arrival.
+        let i = perceive(
+            "away",
+            "normal",
+            WINTER_DAY,
+            45.0,
+            45.0,
+            AWAY_BASELINE,
+            0.0,
+            "off",
+        );
         assert_eq!(i.occupancy, Occupancy::AwayReturning);
         assert_eq!(decide(&i).heat_setpoint, 22.5, "winter returning, no peak");
+        // ...but the lead is the warm-up, not a blanket: a return estimated
+        // past it keeps the setback. From the away baseline that lead
+        // (150) is already past FAR_MIN (120), so a known return is either
+        // close enough to start warming or far - never plain away.
+        let i = perceive(
+            "away",
+            "normal",
+            WINTER_DAY,
+            155.0,
+            45.0,
+            AWAY_BASELINE,
+            0.0,
+            "off",
+        );
+        assert_eq!(i.occupancy, Occupancy::AwayFar);
+        assert_eq!(decide(&i).heat_setpoint, 17.0);
+        let i = perceive(
+            "away",
+            "normal",
+            WINTER_DAY,
+            150.0,
+            45.0,
+            AWAY_BASELINE,
+            0.0,
+            "off",
+        );
+        assert_eq!(
+            i.occupancy,
+            Occupancy::AwayReturning,
+            "inclusive at the lead"
+        );
 
-        // Case 3 - Summer, heading home. Same 20-min lead, cool day. The
-        // house should be AT comfort on arrival (25), never the deep 28
-        // away setback. (Previously only guarded by the >=20 cool sweep.)
-        let i = perceive("away", "normal", SUMMER_DAY, 20.0, 20.0, 0.0, 0.0, "off");
+        // Case 1b - 2026-11-03, the evening that motivated the comfort
+        // target. Mild day, house drifted to 20.3C; heading home was first
+        // known 15 min out and the drive took 26. The lead to livable (19C)
+        // was nothing, so the old rule waited for the 20-min pre-start and
+        // David walked into 22.0. To comfort it is 95 min: a 45-min notice
+        // now starts at once.
+        let i = perceive("away", "normal", WINTER_DAY, 45.0, 45.0, 20.3, 0.0, "off");
+        assert_eq!(i.occupancy, Occupancy::AwayReturning);
+        // a house already at the target only needs the plain pre-start
+        let i = perceive("away", "normal", WINTER_DAY, 45.0, 45.0, 22.5, 0.0, "off");
+        assert_eq!(i.occupancy, Occupancy::Away);
+        let i = perceive("away", "normal", WINTER_DAY, 20.0, 20.0, 22.5, 0.0, "off");
+        assert_eq!(i.occupancy, Occupancy::AwayReturning);
+
+        // Case 3 - Summer, heading home. A hot house is far above any heat
+        // target, so cooling keeps the plain 20-min lead. The house should
+        // be AT comfort on arrival (25), never the deep 28 away setback.
+        let i = perceive("away", "normal", SUMMER_DAY, 20.0, 20.0, 27.0, 0.0, "off");
         assert_eq!(i.occupancy, Occupancy::AwayReturning);
         let d = decide(&i);
         assert_eq!(d.main_mode, HvacMode::Cool);
         assert_eq!(d.cool_setpoint, 25.0, "summer returning = comfort early");
+        let i = perceive("away", "normal", SUMMER_DAY, 45.0, 45.0, 27.0, 0.0, "off");
+        assert_eq!(i.occupancy, Occupancy::Away, "no early start for cooling");
 
-        // Case 2, EVENING peak - the must-preheat one. At work, ~45 min out,
-        // slept home last night; the recovery horizon (peak end + window) is
-        // hours away, so someone is credibly back before the house recovers
-        // -> boost the preheat. This is the scenario whose failure mode is
-        // "cold for a very long time".
-        let i = perceive("away", "preheat", WINTER_DAY, 45.0, 45.0, 0.0, 540.0, "off");
+        // Case 4 - A return during a PEAK never starts an early warm-up:
+        // the returning target there is the shed floor (13C), which the
+        // away baseline already exceeds, so only the plain pre-start is
+        // left - and that only moves the setpoint from 12 to 13.
+        let i = perceive(
+            "away",
+            "peak",
+            WINTER_DAY,
+            45.0,
+            45.0,
+            AWAY_BASELINE,
+            0.0,
+            "off",
+        );
+        assert_eq!(i.occupancy, Occupancy::Away, "no comfort warm-up in a peak");
+        assert_eq!(decide(&i).heat_setpoint, 12.0);
+
+        // Case 2, EVENING peak - the must-preheat one. At work, ~45 min
+        // away and not yet heading home (no estimate), slept home last
+        // night; the recovery horizon (peak end + window) is hours away, so
+        // someone is credibly back before the house recovers -> boost the
+        // preheat. This is the scenario whose failure mode is "cold for a
+        // very long time".
+        let i = perceive(
+            "away",
+            "preheat",
+            WINTER_DAY,
+            0.0,
+            45.0,
+            AWAY_BASELINE,
+            540.0,
+            "off",
+        );
+        assert_eq!(i.occupancy, Occupancy::Away);
         assert!(i.back_during_recovery, "back before horizon -> boost");
         assert_eq!(decide(&i).heat_setpoint, 23.0, "evening peak preheats");
+        // ...and once heading home, the return gets the preheat's home
+        // target (25C is hours away from 19, so it starts at once)
+        let i = perceive(
+            "away",
+            "preheat",
+            WINTER_DAY,
+            45.0,
+            45.0,
+            AWAY_BASELINE,
+            540.0,
+            "off",
+        );
+        assert_eq!(i.occupancy, Occupancy::AwayReturning);
+        assert_eq!(decide(&i).heat_setpoint, 25.0, "heading home in a preheat");
 
         // Case 2, thrift end - PROVABLY absent past the horizon. Genuinely
         // far (floor 240) with the horizon only 180 out: no one can be back
         // before the house recovers, so drop the boost and let the peak fall.
-        let i = perceive("away", "preheat", WINTER_DAY, 0.0, 240.0, 0.0, 180.0, "off");
+        let i = perceive(
+            "away",
+            "preheat",
+            WINTER_DAY,
+            0.0,
+            240.0,
+            AWAY_BASELINE,
+            180.0,
+            "off",
+        );
         assert!(!i.back_during_recovery, "provably absent -> no boost");
         assert_eq!(i.occupancy, Occupancy::AwayFar);
         assert_eq!(decide(&i).heat_setpoint, 17.0, "bare preheat, far & absent");
@@ -769,20 +904,48 @@ mod tests {
         // event", so the morning preheat is skipped - hold the far setback.
         // Same symmetric rule as the evening; the slept_away FACT (mornings
         // follow nights) is what distinguishes them, not a wall clock.
-        let i = perceive("away", "preheat", WINTER_DAY, 0.0, 120.0, 0.0, 540.0, "on");
+        let i = perceive("away", "preheat", WINTER_DAY, 0.0, 120.0, 17.0, 540.0, "on");
         assert!(!i.back_during_recovery, "slept away, no evidence -> skip");
         assert_eq!(i.occupancy, Occupancy::AwayFar);
         assert_eq!(decide(&i).heat_setpoint, 17.0, "morning slept-away skips");
 
         // Case 2, morning counter-case: slept away but ACTUALLY heading
         // home (nav estimate 60 min, well inside the horizon). Real return
-        // evidence outranks the overnight assumption - preheat resumes.
-        let i = perceive("away", "preheat", WINTER_DAY, 60.0, 60.0, 0.0, 540.0, "on");
+        // evidence outranks the overnight assumption: from the 17C far
+        // setback the preheat's home target is hours away, so the return
+        // starts at once and gets it.
+        let i = perceive("away", "preheat", WINTER_DAY, 60.0, 60.0, 17.0, 540.0, "on");
         assert!(
             i.back_during_recovery,
             "evidence of return beats slept_away"
         );
-        assert_eq!(decide(&i).heat_setpoint, 23.0, "driving home = boost");
+        assert_eq!(i.occupancy, Occupancy::AwayReturning);
+        assert_eq!(
+            decide(&i).heat_setpoint,
+            25.0,
+            "driving home = preheat target"
+        );
+    }
+
+    /// The lead target is whatever the matrix commands for a return, so a
+    /// change to a returning cell moves the lead with it - there is no
+    /// second copy of 22.5 to forget.
+    #[test]
+    fn the_returning_target_is_the_matrix_cell() {
+        use EnergyPeriod::*;
+        use HvacMode::*;
+
+        for main_mode in [Heat, Cool, Circulate, Off] {
+            for energy_period in [Normal, Preheat, Peak] {
+                let i = inputs(Occupancy::AwayReturning, energy_period, main_mode);
+                assert_eq!(
+                    returning_heat_setpoint(main_mode, energy_period, false, true),
+                    decide(&i).heat_setpoint,
+                );
+            }
+        }
+        assert_eq!(returning_heat_setpoint(Heat, Normal, false, true), 22.5);
+        assert_eq!(returning_heat_setpoint(Heat, Peak, false, true), 13.0);
     }
 
     /// Without heat demand the aux zone (basement baseboards) holds
